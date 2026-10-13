@@ -1,0 +1,13 @@
+{
+  "tenant_id": "请替换为客户的目录租户ID",
+  "subscription_ids": "all",
+  "model": "gpt-image-2",
+  "model_version": "2026-04-21",
+  "sku": "GlobalStandard",
+  "regions": "auto",
+  "quota_scope": "unknown",
+  "data_zones": {},
+  "resource_group_template": "rg-image-{sub8}-{region}",
+  "account_template": "ai-image-{sub8}-{region}",
+  "deployment_name": "images"
+}
