@@ -8,7 +8,7 @@
 
 网页默认使用 Azure 返回的默认版本；高级设置仍可以指定精确版本。新部署采用检查时确认的版本，不自动升级现有部署。`gpt-image-2` 候选区域限定为 East US 2、West US 3、Poland Central、Sweden Central、UAE North；其余模型独立查询各自区域。
 
-容器启动、Azure Container App 部署、登录策略、最大容量和客户 Excel 格式见 [客户网页使用说明](docs/WEB_GUIDE.md)。下文保留原有脚本方式，脚本仍要求明确填写版本。
+容器启动、Azure Container App 部署、登录策略、Tier 1 目标和客户 Excel 格式见 [客户网页使用说明](docs/WEB_GUIDE.md)。生图新部署目标为 2 RPM，所有文本新部署目标为 1,000,000 TPM；以实际可用额度和 Azure 容量换算为准，不自动修改已有部署。下文保留原有脚本方式，脚本仍要求明确填写版本。
 
 公共仓库：[beifu12/azure-foundry-image-batch](https://github.com/beifu12/azure-foundry-image-batch)。客户可以点击 **Code → Download ZIP**，或在 [发布页面](https://github.com/beifu12/azure-foundry-image-batch/releases/latest) 下载完整脚本包。
 
@@ -17,8 +17,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.1.1/azure-foundry-image-batch.zip -o image-batch-v1.1.1.zip
-unzip image-batch-v1.1.1.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.0/azure-foundry-image-batch.zip -o image-batch-v1.2.0.zip
+unzip image-batch-v1.2.0.zip
 cd azure-foundry-image-batch
 ```
 
@@ -36,7 +36,7 @@ cd azure-foundry-image-batch
 - 查询 Foundry/Azure OpenAI 账户、现有部署、模型版本、可用区域和容量。某个账户部署列表读取失败时，不把它当作空账户；该订阅记录失败。
 - 同订阅、同区域已有同模型、同部署类型时跳过，即使版本或命名不同也不会再创建。不升级、不扩容、不更换现有部署。失败或尚在创建的部署列为阻塞，须先检查处理。
 - 命名由客户配置；区域已有一个可复用账户时使用它，已有多个时要求客户明确命名，不随机选取。
-- 从真实配额剩余额度、SKU 最小/最大/步长及平台可用容量计算最大合法容量。区域独立额度各区分别分配；共享额度在同一个池内分配，不重复乘以区域数量。
+- 在生图 2 RPM／文本 1,000,000 TPM 目标内，从真实剩余配额、SKU 约束和平台可用容量计算合法分配。余额不足时可能低于目标；区域独立额度各区分别分配，共享额度在同一个池内分配，不重复乘以区域数量。
 - 执行前重新扫描，与已确认清单比较。状态或配额改变时要求重扫；长时间创建账户后再次检查额度。
 - 每个订阅/区域单独记录结果，失败后继续后续项。结果逐项保存；中断后重新扫描确认，不盲目重试写入。
 - 返回 Azure 实际 Endpoint、部署名称、容量、实际 RPM 和原始限流字段。Key 需要显式选择，单独写入私密文件，不写普通结果或日志，也不重置已有 Key。

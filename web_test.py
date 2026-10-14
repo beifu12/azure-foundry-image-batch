@@ -29,7 +29,7 @@ class MemoryAzure:
         if path.endswith('/modelCapacities'):
             locations=['eastus2','westus3'] if params['modelName']=='gpt-image-2' else ['eastus','eastus2','westus3']
             return [{'location':r,'properties':{'skuName':'GlobalStandard','availableCapacity':1}} for r in locations]
-        if path.endswith('/models'):return [{'model':{'format':'OpenAI','name':name,'version':'2026-01-01','isDefaultVersion':True,'skus':[{'name':'GlobalStandard','usageName':name,'capacity':{'minimum':1,'maximum':1,'step':1},'rateLimits':[{'count':1,'renewalPeriod':60}]}]}} for name in batch.MODELS]
+        if path.endswith('/models'):return [{'model':{'format':'OpenAI','name':name,'version':'2026-01-01','isDefaultVersion':True,'skus':[{'name':'GlobalStandard','usageName':name,'capacity':{'minimum':1,'maximum':1,'step':1},'rateLimits':[{'key':'request','count':1,'renewalPeriod':60}]+([] if name.startswith('gpt-image-') else [{'key':'token','count':1000,'renewalPeriod':60}])}]}} for name in batch.MODELS]
         if path.endswith('/usages'):return [{'name':{'value':name},'unit':'Count','currentValue':0,'limit':1} for name in batch.MODELS]
         raise AssertionError(path)
     def optional(self,path,version=None):return self.resources.get(path)
@@ -48,6 +48,17 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_manual_other_regions_are_separate_from_image2_candidates(self):
+        session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-04-21'},{'name':'gpt-6-sol','version':'2026-01-01'}],'regions':list(web.REGIONS),'other_regions':['eastus2'],'auto_regions':False,'resource_group_template':'rg-{sub8}','account_template':'ai-{sub8}-{region}','project_template':'{foundry}-project'}
+        configs,_=web.configurations(session,data)
+        self.assertEqual(configs[0]['regions'],list(web.REGIONS));self.assertEqual(configs[1]['regions'],['eastus2'])
+
+    def test_only_text_models_do_not_require_image2_region_selection(self):
+        session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-6-sol','version':'2026-01-01'}],'regions':[],'other_regions':['eastus2'],'auto_regions':False,'resource_group_template':'rg-{sub8}','account_template':'ai-{sub8}-{region}','project_template':'{foundry}-project'}
+        configs,_=web.configurations(session,data);self.assertEqual(configs[0]['regions'],['eastus2'])
+
     def test_cancel_invalidates_pending_browser_authorization(self):
         session=web.Session();session.login_generation=2;session.oauth={'flow':{'state':'synthetic-state'}};session.login_url='https://login.microsoftonline.com/'
         web.cancel_job(session)

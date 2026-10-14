@@ -85,9 +85,9 @@ class Azure:
         return self.call('PUT', path, body, {'api-version':version}, {'If-None-Match':'*'})
 
 
-def integer(value):
+def integer(value,field='Azure 容量值'):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or int(value) != value or value < 0:
-        raise ValueError('Azure 容量值缺失或不是非负整数，不能猜测。')
+        raise ValueError(field+' 缺失或不是非负整数，不能确认容量。')
     return int(value)
 
 
@@ -95,10 +95,14 @@ def allowed_capacity(limit, constraints):
     limit = integer(limit)
     if constraints.get('allowedValues'):
         values = [integer(v) for v in constraints['allowedValues']]
-        return max([0] + [v for v in values if 0 < v <= limit])
-    minimum = integer(constraints.get('minimum'))
-    maximum = integer(constraints.get('maximum'))
-    step = integer(constraints.get('step'))
+        minimum=integer(constraints.get('minimum',1),'SKU capacity.minimum')
+        maximum=integer(constraints.get('maximum',max(values)),'SKU capacity.maximum')
+        step=integer(constraints.get('step',1),'SKU capacity.step')
+        if minimum<1 or maximum<minimum or step<1:raise ValueError('SKU 容量约束无效。')
+        return max([0] + [v for v in values if minimum<=v<=min(limit,maximum) and (v-minimum)%step==0])
+    minimum = integer(constraints.get('minimum'),'SKU capacity.minimum')
+    maximum = integer(constraints.get('maximum'),'SKU capacity.maximum')
+    step = integer(constraints.get('step'),'SKU capacity.step')
     if minimum < 1 or maximum < minimum or step < 1: raise ValueError('SKU 容量约束无效。')
     limit = min(limit, maximum)
     return minimum + ((limit-minimum)//step)*step if limit >= minimum else 0
@@ -131,7 +135,7 @@ def allocate(rows):
             constraints = row.get('constraints') or {k:row[k] for k in ('minimum','maximum','step')}
             ceiling = min(budget, integer(row['maximum']))
             if constraints.get('allowedValues'):
-                choices = sorted({0} | {integer(v) for v in constraints['allowedValues'] if 0 < v <= ceiling})
+                choices = sorted({0} | {integer(v) for v in constraints['allowedValues'] if 0 < v <= ceiling and allowed_capacity(v,constraints)==v})
             else:
                 lo, step = integer(constraints.get('minimum')), integer(constraints.get('step'))
                 allowed_capacity(ceiling, constraints)
@@ -162,16 +166,22 @@ def quota_pool(scope, region, zones):
     raise ValueError('必须确认真实配额范围；data-zone 还需配置每个区域所属的数据区。')
 
 
-def rpm(limits):
+def minute_rate(limits,tokens=False):
     values = []
     for item in limits or []:
         key = str(item.get('key') or '').lower()
-        if 'token' in key: continue
-        if key and 'request' not in key: continue
+        if tokens and 'token' not in key:continue
+        if not tokens and ('token' in key or (key and 'request' not in key)):continue
         count, period = item.get('count'), item.get('renewalPeriod')
-        if isinstance(count, (int,float)) and isinstance(period, (int,float)) and count >= 0 and period > 0:
+        if not isinstance(count,bool) and not isinstance(period,bool) and isinstance(count, (int,float)) and isinstance(period, (int,float)) and math.isfinite(count) and math.isfinite(period) and count >= 0 and period > 0:
             values.append(count*60/period)
     return min(values) if values else None
+
+
+def rpm(limits):return minute_rate(limits)
+
+
+def tpm(limits):return minute_rate(limits,tokens=True)
 
 
 def render_name(template, sid, region, kind, subscription_name='', index=1):
@@ -273,10 +283,18 @@ def model_metadata(api, sid, region, config):
     usages = api.all(path+'/usages', {'api-version':'2024-10-01'})
     quota = [u for u in usages if u.get('name',{}).get('value') == sku.get('usageName')]
     if not sku.get('usageName') or len(quota) != 1 or quota[0].get('unit') != 'Count': raise ValueError('无法唯一匹配 Count 配额单位，不能猜测最大容量。')
-    remaining = max(0,integer(quota[0].get('limit'))-integer(quota[0].get('currentValue')))
-    constraints = sku.get('capacity') or {}
-    maximum = allowed_capacity(remaining,constraints)
-    return dict(usage_name=sku['usageName'],remaining=remaining,maximum=maximum,constraints=constraints,unit_rpm=rpm(sku.get('rateLimits')))
+    remaining = max(0,integer(quota[0].get('limit'),'配额上限 limit')-integer(quota[0].get('currentValue'),'已用配额 currentValue'))
+    constraints = dict(sku.get('capacity') or {})
+    # Standard SKUs allocate integer capacity units; default is not a minimum.
+    # Preserve explicit constraints and never infer a missing maximum or quota.
+    if config['sku'] in ('GlobalStandard','DataZoneStandard') and constraints:
+        constraints.setdefault('minimum',1);constraints.setdefault('step',1)
+    unit_rpm=rpm(sku.get('rateLimits'));unit_tpm=tpm(sku.get('rateLimits'))
+    image=config['model'].startswith('gpt-image-');target=2 if image else 1000000
+    unit=unit_rpm if image else unit_tpm;label='RPM' if image else 'TPM'
+    if unit is None or unit<=0 or not math.isfinite(unit):raise ValueError('Azure 未返回有效的 '+label+' 与容量换算关系，无法按 Tier 1 目标安排创建。')
+    maximum = allowed_capacity(min(remaining,math.floor(target/unit)),constraints)
+    return dict(usage_name=sku['usageName'],remaining=remaining,maximum=maximum,constraints=constraints,unit_rpm=unit_rpm,unit_tpm=unit_tpm,**{'target_rpm' if image else 'target_tpm':target})
 
 
 def scan(api, config, on_progress=None):
@@ -325,7 +343,8 @@ def scan(api, config, on_progress=None):
                         row.update(status='existing', existing=[{'account_id':a['id'],'deployment':d['name'],'version':d.get('properties',{}).get('model',{}).get('version'),'capacity':d.get('sku',{}).get('capacity')} for a,d in existing])
                         continue
                     row.update(model_metadata(api,sid,region,{**config,'model_version':row['version']}))
-                    row['maximum'] = allowed_capacity(min(row['maximum'],integer(raw_capacity['properties'].get('availableCapacity'))),row['constraints'])
+                    row['maximum'] = allowed_capacity(min(row['maximum'],integer(raw_capacity['properties'].get('availableCapacity'),'区域可用容量 availableCapacity')),row['constraints'])
+                    if not row['maximum']:raise ValueError('此区域剩余配额、可用容量或 Tier 1 目标内合法容量为 0；不会创建零容量部署。')
                     group = render_name(config['resource_group_template'],sid,region,'group',sub.get('displayName',''),region_index)
                     name = render_name(config['account_template'],sid,region,'account',sub.get('displayName',''),region_index)
                     desired = root+'/resourceGroups/'+group+'/providers/Microsoft.CognitiveServices/accounts/'+name
@@ -342,7 +361,7 @@ def scan(api, config, on_progress=None):
                     row['status']='planned';pending.append(row)
                 except (ValueError,RuntimeError) as error: row.update(status='blocked',message=str(error))
             for row, capacity in zip(pending,allocate(pending)):
-                row.update(capacity=capacity,estimated_rpm=capacity*row['unit_rpm'] if row['unit_rpm'] is not None else None)
+                row.update(capacity=capacity,estimated_rpm=capacity*row['unit_rpm'] if row['unit_rpm'] is not None else None,estimated_tpm=capacity*row['unit_tpm'] if row['unit_tpm'] is not None else None)
                 if not capacity: row.update(status='blocked',message='合法剩余额度不足；不会创建零容量部署。')
         except (ValueError,RuntimeError) as error:
             report['errors'].append({'subscription_id':sid,'message':str(error)})
@@ -364,7 +383,7 @@ def wait_ready(api, path, timeout=900):
 def account_result(account, deployment):
     props=account.get('properties',{})
     dp=deployment.get('properties',{})
-    return {'account_id':account['id'],'endpoint':props.get('endpoint'),'endpoints':props.get('endpoints',{}),'deployment':deployment.get('name'),'model':dp.get('model'), 'capacity':deployment.get('sku',{}).get('capacity'),'rpm':rpm(dp.get('rateLimits')),'rate_limits':dp.get('rateLimits',[])}
+    return {'account_id':account['id'],'endpoint':props.get('endpoint'),'endpoints':props.get('endpoints',{}),'deployment':deployment.get('name'),'model':dp.get('model'), 'capacity':deployment.get('sku',{}).get('capacity'),'rpm':rpm(dp.get('rateLimits')),'tpm':tpm(dp.get('rateLimits')),'rate_limits':dp.get('rateLimits',[])}
 
 
 def execute(api, confirmed, on_progress=None):

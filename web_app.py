@@ -213,12 +213,13 @@ def configurations(session,data):
     if not isinstance(models,list) or not models or len(models)>len(batch.MODELS):raise ValueError('请至少选择一个支持的模型，并填写版本。')
     if len({r.get('name') for r in models})!=len(models):raise ValueError('模型选择不能重复。')
     regions=data.get('regions')
-    if not isinstance(regions,list) or not regions or any(not re.fullmatch(r'[a-z0-9]{2,40}',r) for r in regions):raise ValueError('请选择区域，或填写 Azure 区域代码。')
-    if len(regions)>30:raise ValueError('一次最多检查 30 个区域。')
+    others=data.get('other_regions',['eastus2'])
+    for values in (regions,others):
+        if not isinstance(values,list) or len(values)>30 or any(not isinstance(r,str) or not re.fullmatch(r'[a-z0-9]{2,40}',r) for r in values):raise ValueError('区域须为最多 30 个有效 Azure 区域代码。')
     result=[]
     for model in models:
-        approved=[r for r in regions if r in REGIONS] if model['name']=='gpt-image-2' else ('auto' if data.get('auto_regions') is True else list(dict.fromkeys(regions)))
-        if not approved:raise ValueError('gpt-image-2 请至少勾选一个指定支持区域。')
+        approved=list(dict.fromkeys(r for r in regions if r in REGIONS)) if model['name']=='gpt-image-2' else ('auto' if data.get('auto_regions') is True else list(dict.fromkeys(others)))
+        if not approved:raise ValueError('请为所选模型指定至少一个部署区域。')
         version=model.get('version','').strip()
         config=dict(tenant_id=session.tenant,subscription_ids=selected,model=model['name'],model_version=version or 'AzureDefault',use_default=not version,sku=data.get('sku','GlobalStandard'),regions=approved,quota_scope=data.get('quota_scope','unknown'),data_zones=data.get('data_zones',{}),resource_group_template=data.get('resource_group_template',''),account_template=data.get('account_template',''),deployment_name=model['name'])
         batch.check_config(config)
@@ -423,7 +424,7 @@ def start_deploy(session,data):
 def result_row(row,output,project,status):
     aid=output['account_id'];actual=output.get('model') or {}
     endpoint=output.get('endpoints',{}).get('AI Foundry API') or output.get('endpoint') or ''
-    return {'订阅':row['subscription'],'订阅 ID':row['subscription_id'],'资源组':aid.split('/')[4],'资源名称-foundry':aid.rsplit('/',1)[-1],'区域':REGIONS.get(row['region'],row['region']),'资源':project,'url':endpoint,'密钥':'未读取','_account_id':aid,'model':actual.get('name') or row['model'],'version':actual.get('version') or '', 'deployment':output['deployment'],'capacity':output['capacity'],'rpm':output.get('rpm'),'status':status}
+    return {'订阅':row['subscription'],'订阅 ID':row['subscription_id'],'资源组':aid.split('/')[4],'资源名称-foundry':aid.rsplit('/',1)[-1],'区域':REGIONS.get(row['region'],row['region']),'资源':project,'url':endpoint,'密钥':'未读取','_account_id':aid,'model':actual.get('name') or row['model'],'version':actual.get('version') or '', 'deployment':output['deployment'],'capacity':output['capacity'],'rpm':output.get('rpm'),'tpm':output.get('tpm'),'status':status}
 
 
 def read_keys(session):
@@ -461,7 +462,7 @@ def excel(rows,details=None):
         for i,column in enumerate(columns,1):sheet.column_dimensions[get_column_letter(i)].width=44 if column in ('url','密钥','订阅 ID') else 28
     unique={tuple(str(row.get(k,'')) for k in COLUMNS):row for row in rows}
     fill(sheet,COLUMNS,unique.values())
-    if details:fill(book.create_sheet('模型部署'),('订阅','资源名称-foundry','区域','资源','model','version','deployment','capacity','rpm','status'),details)
+    if details:fill(book.create_sheet('模型部署'),('订阅','资源名称-foundry','区域','资源','model','version','deployment','capacity','rpm','tpm','status'),details)
     stream=io.BytesIO();book.save(stream);return stream.getvalue()
 
 

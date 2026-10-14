@@ -47,6 +47,71 @@ class FakeAzure:
 
 
 class ScanTests(unittest.TestCase):
+    def test_tier1_image_target_caps_capacity_at_two_rpm(self):
+        class LargeQuota(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/modelCapacities'):
+                    for r in rows:r['properties']['availableCapacity']=50
+                return rows
+        api=LargeQuota();api.remaining=50
+        rows=batch.scan(api,configuration())['rows']
+        self.assertEqual([r.get('capacity') for r in rows],[2,2])
+        self.assertTrue(all(r.get('target_rpm')==2 and r.get('estimated_rpm')==2 for r in rows))
+
+    def test_tier1_text_target_uses_azure_token_rate_and_rounds_down(self):
+        class TextQuota(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/models'):
+                    model=rows[0]['model'];model['name']='gpt-6-sol'
+                    model['skus'][0].update(capacity={'default':10,'maximum':10000000},rateLimits=[{'key':'request','count':1,'renewalPeriod':60},{'key':'token','count':500,'renewalPeriod':20}])
+                if path.endswith('/modelCapacities'):
+                    for r in rows:r['properties']['availableCapacity']=5000
+                return rows
+        config=configuration();config['model']='gpt-6-sol';api=TextQuota();api.remaining=5000
+        rows=batch.scan(api,config)['rows']
+        self.assertEqual([r.get('capacity') for r in rows],[666,666])
+        self.assertTrue(all(r.get('target_tpm')==1000000 and r.get('estimated_tpm')==999000 for r in rows))
+
+    def test_tier1_text_target_blocks_missing_token_conversion(self):
+        class NoTokens(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/models'):rows[0]['model']['name']='gpt-6-sol'
+                return rows
+        config=configuration();config['model']='gpt-6-sol'
+        rows=batch.scan(NoTokens(),config)['rows']
+        self.assertTrue(all(r['status']=='blocked' and 'TPM' in r['message'] for r in rows))
+
+    def test_standard_catalog_optional_minimum_and_step_do_not_block_scan(self):
+        class OptionalBounds(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/models'):rows[0]['model']['skus'][0]['capacity']={'default':3,'maximum':1000}
+                return rows
+        report=batch.scan(OptionalBounds(),configuration())
+        self.assertEqual([r.get('capacity') for r in report['rows']],[2,2])
+
+    def test_explicit_invalid_sku_bounds_are_not_replaced_by_defaults(self):
+        class InvalidBounds(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/models'):rows[0]['model']['skus'][0]['capacity']['minimum']=None
+                return rows
+        rows=batch.scan(InvalidBounds(),configuration())['rows']
+        self.assertTrue(all(r['status']=='blocked' and 'minimum' in r['message'] for r in rows))
+
+    def test_missing_available_capacity_identifies_the_failed_field(self):
+        class MissingCapacity(FakeAzure):
+            def all(self,path,params=None):
+                rows=super().all(path,params)
+                if path.endswith('/modelCapacities'):
+                    for row in rows:row['properties'].pop('availableCapacity')
+                return rows
+        rows=batch.scan(MissingCapacity(),configuration())['rows']
+        self.assertTrue(all(r['status']=='blocked' and 'availableCapacity' in r['message'] for r in rows))
+
     def test_text_models_are_valid_selections_without_inventing_versions(self):
         for model in ('gpt-5.6-terra','gpt-5.6-luna','gpt-5.6-sol'):
             config=configuration();config['model']=model
@@ -215,6 +280,20 @@ class SetupTests(unittest.TestCase):
 
 
 class AllocationTests(unittest.TestCase):
+    def test_shared_pool_allowed_values_observe_minimum_and_step(self):
+        for allowed in ([1,2,4],[2,3,4]):
+            constraints={'minimum':2,'maximum':4,'step':2,'allowedValues':allowed}
+            rows=[{'pool':'same','remaining':5,'maximum':4,'constraints':constraints} for _ in range(2)]
+            values=batch.allocate(rows)
+            self.assertEqual(sum(values),4)
+            self.assertTrue(all(v==0 or v in (2,4) for v in values))
+
+    def test_allowed_values_do_not_bypass_explicit_capacity_bounds(self):
+        self.assertEqual(batch.allowed_capacity(200,{'allowedValues':[100,200],'maximum':100}),100)
+        self.assertEqual(batch.allowed_capacity(12,{'allowedValues':[2,3,5,8,11],'minimum':2,'maximum':12,'step':3}),11)
+        with self.assertRaises(ValueError):batch.allowed_capacity(200,{'allowedValues':[100,200],'minimum':None})
+        with self.assertRaises(ValueError):batch.allowed_capacity(200,{'allowedValues':[100,200],'step':0})
+
     def test_regional_quota_is_not_shared(self):
         rows = [dict(region=r, pool=r, remaining=2, maximum=10, minimum=1, step=1) for r in ['a', 'b', 'c', 'd', 'e']]
         self.assertEqual(batch.allocate(rows), [2]*5)
