@@ -299,6 +299,46 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(sdk.call_args.kwargs.get('authority'),'https://login.microsoftonline.com')
 
 
+class PackageTests(unittest.TestCase):
+    def setUp(self):
+        package_source=SOURCE.with_name('package_release.py')
+        package_spec=importlib.util.spec_from_file_location('package_release',package_source)
+        self.package=importlib.util.module_from_spec(package_spec)
+        if package_source.exists():package_spec.loader.exec_module(self.package)
+
+    def test_zip_members_use_ascii_names_and_predictable_root(self):
+        import tempfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'package.zip'
+            self.package.build_package(output)
+            with zipfile.ZipFile(output) as archive:
+                self.assertTrue(all(name.isascii() for name in archive.namelist()))
+                self.assertTrue(all(name.startswith('azure-foundry-image-batch/') for name in archive.namelist()))
+                self.assertIsNone(archive.testzip())
+
+    def test_package_excludes_local_customer_files(self):
+        import tempfile
+        import zipfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/'source';source.mkdir()
+            for name in self.package.FILES:
+                path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('source fixture',encoding='utf-8')
+            (source/'config.json').write_text('customer fixture',encoding='utf-8')
+            (source/'keys.private.json').write_text('private fixture',encoding='utf-8')
+            with patch.object(self.package,'SOURCE',source):self.package.build_package(Path(folder)/'package.zip')
+            with zipfile.ZipFile(Path(folder)/'package.zip') as archive:
+                self.assertFalse(any(name.endswith('/config.json') or '.private.json' in name for name in archive.namelist()))
+
+    def test_package_preserves_existing_archive(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'package.zip';output.write_bytes(b'previous archive')
+            with self.assertRaises(FileExistsError):self.package.build_package(output)
+            self.assertEqual(output.read_bytes(),b'previous archive')
+
+
 class TransportTests(unittest.TestCase):
     def test_foreign_paging_host_rejected_before_authentication(self):
         api = batch.Azure(None)

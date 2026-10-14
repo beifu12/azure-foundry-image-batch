@@ -2,6 +2,18 @@
 
 公共仓库：[beifu12/azure-foundry-image-batch](https://github.com/beifu12/azure-foundry-image-batch)。客户可以点击 **Code → Download ZIP**，或在 [发布页面](https://github.com/beifu12/azure-foundry-image-batch/releases/latest) 下载完整脚本包。
 
+发布包内的目录及文件名全部使用 ASCII 英文，解压后的固定目录为 `azure-foundry-image-batch`；中文说明仍保留在文件内容中，避免部分 Linux 解压工具将中文目录名解错。
+
+Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
+
+```bash
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.0.1/azure-foundry-image-batch.zip -o image-batch-v1.0.1.zip
+unzip image-batch-v1.0.1.zip
+cd azure-foundry-image-batch
+```
+
+旧版解出的乱码目录可以暂时保留，不影响进入新版英文目录。
+
 在客户自己的电脑或 Cloud Shell 中运行。支持 Azure 公有云；不需要登录玖云 Dashboard，也不把客户凭据上传到玖云。
 
 客户直接使用请按本文运行；交给自己的 Agent 时，先让它阅读 [Agent 操作指南](docs/AGENT_GUIDE.md) 和 [AGENTS.md](AGENTS.md)。环境、登录及常见失败见 [排障说明](docs/TROUBLESHOOTING.md)。
@@ -154,6 +166,8 @@ az login --tenant "客户租户ID" --allow-no-subscriptions
 已通过模拟 Azure 响应的自动化测试，涵盖配额分配、重复部署、状态变化、失败继续、凭据文件保护等。尚未在客户租户完成真实应用创建、RBAC 分配、模型部署和 Key 读取验收；首次仅执行一个测试订阅，再核对 Portal 及 API 调用。部署脚本不发起付费的图片生成测试。
 
 公共仓库的自动检查在 Windows/Linux、Python 3.10/3.12 上运行模拟测试和应用身份离线环境检查，不使用 Azure 凭据。GitHub 自检通过也不等于客户环境已部署成功。
+
+维护者可运行 `python package_release.py --output dist/azure-foundry-image-batch.zip` 生成源码白名单发布包。它不收集真实 config、凭据或结果，并且不会覆盖已存在的压缩包。
 
 ## 官方参考
 

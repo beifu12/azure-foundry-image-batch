@@ -17,3 +17,4 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -X utf8 self_test.py
       - run: python -X utf8 image_batch.py doctor --offline --auth app
+      - run: python package_release.py --output dist/azure-foundry-image-batch.zip
