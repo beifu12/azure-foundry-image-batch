@@ -347,8 +347,8 @@ def start_scan(session,data):
                             row.update(status='blocked',message='现有 Project 尚未配置成功。');break
                     else:present=None
                     projects[aid]={'name':name,'new':present is None}
-            # Blocked annotations live separately from the script's authoritative plan.
-            # A block stops this model, rather than passing modified rows to execute().
+            # Preserve the authoritative plan for full revalidation. Project blocks
+            # apply only to the affected subscription/region, not the whole model.
             bundles.append({'plan':plan,'authoritative':authoritative,'projects':projects,'project_errors':project_errors})
             issues.extend(config['model']+'：'+error['message'] for error in plan['errors'])
         if event.is_set():raise Cancelled()
@@ -389,7 +389,7 @@ def start_deploy(session,data):
     if session.api is None:raise ValueError('请先登录。')
     if not session.plan_id or data.get('plan_id')!=session.plan_id or data.get('confirmed') is not True:raise ValueError('请先检查并确认当前服务端清单；不能直接上传创建清单。')
     bundles=copy.deepcopy(session.plans)
-    if not any(not b.get('project_errors') and any(r['status'] in ('planned','existing') for r in b['plan']['rows']) for b in bundles):raise ValueError('清单没有可执行项，请调整后重新检查。')
+    if not any(any(r['status'] in ('planned','existing') for r in b['plan']['rows']) for b in bundles):raise ValueError('清单没有可执行项，请调整后重新检查。')
     def deploy(event):
         if not WRITE_LOCK.acquire(blocking=False):raise ValueError('另一项创建任务正在执行，请稍后重新检查。')
         try:deploy_locked(event)
@@ -401,9 +401,8 @@ def start_deploy(session,data):
         with session.lock:session.plan_id='';session.results=[];session.keys={}
         owned_accounts=set()
         for bundle in bundles:
-            if bundle.get('project_errors'):
-                issues.extend(bundle['project_errors']);done+=len(bundle['plan']['rows'])*2;progress(session,done,total,'跳过 Project 不兼容的模型');continue
             expected=copy.deepcopy(bundle.get('authoritative',bundle['plan']))
+            blocked={(row['subscription_id'],row['region']):row.get('message') or '此项检查未通过，不执行配置。' for row in bundle['plan']['rows'] if row['status']=='blocked'}
             for row in expected['rows']:
                 if row.get('new_account') and row['account_id'] in owned_accounts:row['new_account']=False
             def checkpoint(current):
@@ -414,7 +413,7 @@ def start_deploy(session,data):
                 with session.lock:
                     if session.api is not None:session.results=copy.deepcopy(list(result.values()))
                 progress(session,done+sum('outputs' in r or r.get('status')=='failed' for r in current['rows']),total,'部署结果已保存，继续核对 Project')
-            report=batch.execute(api,expected,on_progress=checkpoint)
+            report=batch.execute(api,expected,on_progress=checkpoint,**({'blocked':blocked} if blocked else {}))
             for row in report['rows']:
                 if row.get('status') in ('failed','blocked'):issues.append(row['subscription']+' / '+row['region']+'：'+row.get('message','配置失败'))
                 for output in row.get('outputs',[]):

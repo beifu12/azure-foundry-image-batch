@@ -59,9 +59,16 @@ $('subscription-search').oninput=showSubscriptions;
 $('subscription-all').onchange=e=>{draft=e.target.checked?new Set((state.subscriptions||[]).map(s=>s.subscriptionId)):new Set();showSubscriptions();};
 $('subscription-apply').onclick=()=>{selected=new Set(draft);settingsChanged=true;settingsRevision++;closePicker();render(state);};$('subscription-cancel').onclick=closePicker;
 document.addEventListener('click',e=>{if(!e.target.closest('.picker'))closePicker();});document.addEventListener('keydown',e=>{if(e.key==='Escape')closePicker();});
-$('settings-panel').addEventListener('input',e=>{if(e.target.closest('.popover'))return;settingsChanged=true;settingsRevision++;$('deploy').disabled=true;$('create-note').textContent='设置已变化，请重新检查。';});
+$('settings-panel').addEventListener('input',e=>{if(e.target.closest('.popover'))return;settingsChanged=true;settingsRevision++;$('deploy').disabled=true;$('create-note').textContent='设置已变化，请重新检查。';updateBatchSummary();});
 $('quota').onchange=()=>{$('zone-label').hidden=$('quota').value!=='data-zone';};
 $('manual-versions').onchange=()=>{for(const input of versionInputs.values())input.hidden=!$('manual-versions').checked;};
+function updateBatchSummary(){
+ const models=[...$('models').querySelectorAll('input[type=checkbox]:checked')].map(i=>i.value),regions=[...$('regions').querySelectorAll('input:checked')].map(i=>regionNames[i.value]||i.value),parts=[];
+ $('batch-count').textContent=`${selected.size} 个订阅 · ${models.length} 个模型`;
+ if(models.includes('gpt-image-2'))parts.push(`gpt-image-2：${regions.length} 个区域`);
+ if(models.some(name=>name!=='gpt-image-2'))parts.push(`其他模型：${$('auto-regions').checked?'自动检查可用区域':$('extra-regions').value.split(',').map(r=>regionNames[r.trim().toLowerCase()]||r.trim()).filter(Boolean).join('、')||'未选择区域'}`);
+ $('region-summary').textContent=parts.join('；')||'请勾选需要部署的模型。';
+}
 function form(){const models=[...$('models').querySelectorAll('.model-choice')].filter(l=>l.querySelector('input[type=checkbox]').checked).map(l=>({name:l.querySelector('input[type=checkbox]').value,version:l.querySelector('input:not([type=checkbox])').value.trim()}));
  const regions=[...$('regions').querySelectorAll('input:checked')].map(i=>i.value),otherRegions=$('extra-regions').value.split(',').map(v=>v.trim().toLowerCase()).filter(Boolean);
  if(!selected.size)throw new Error('请至少勾选一个订阅。');if(!models.length)throw new Error('请至少选择一个模型。');if($('manual-versions').checked&&models.some(m=>!m.version))throw new Error('手动版本模式下，请填写所选模型的精确版本。');if(models.some(m=>m.name==='gpt-image-2')&&!regions.length)throw new Error('请勾选 gpt-image-2 的候选区域。');if(models.some(m=>m.name!=='gpt-image-2')&&!$('auto-regions').checked&&!otherRegions.length)throw new Error('请填写其他模型的部署区域，例如 eastus2。');if(!$('manual-versions').checked)for(const model of models)model.version='';
@@ -85,10 +92,13 @@ function render(next){state=next;const busy=['running','cancelling'].includes(ne
  if(next.login_error)error(next.login_error);
  if(next.login_url&&next.login_url!==redirectedLogin){try{const destination=new URL(next.login_url);if(destination.protocol==='https:'&&destination.hostname==='login.microsoftonline.com'){redirectedLogin=next.login_url;window.location.assign(next.login_url);}}catch{error('Microsoft 登录地址无效，请重新连接。');}}
  $('connection-label').textContent=next.connected?'已连接客户 Azure':'尚未连接 Azure';$('connection-dot').classList.toggle('connected',!!next.connected);$('tenant-label').textContent=next.tenant_id||'登录后显示客户租户';$('logout').hidden=!next.connected;$('login-panel').hidden=!!next.connected;
+ $('settings-panel').hidden=!next.connected;
+ $('tenant-options-title').textContent=next.login_mode==='browser'?'指定客户租户（可选，来宾账号可填写）':'填写客户租户（登录前必填）';if(next.login_mode!=='browser')$('tenant-options').open=true;
  $('tenant').placeholder=next.login_mode==='browser'?'可留空：登录后自动识别客户租户':'请输入客户 Azure 租户 UUID';
  $('login').disabled=busy;for(const id of ['scan','catalog'])$(id).disabled=busy||!next.connected;
  const signature=JSON.stringify(next.subscriptions||[]);if(signature!==subscriptionSignature){subscriptionSignature=signature;selected=new Set((next.subscriptions||[]).map(s=>s.subscriptionId));closePicker();}
  $('subscription-count').textContent=next.connected?`已选择 ${selected.size} 项`:'尚未连接';
+ updateBatchSummary();
  $('challenge').hidden=!next.challenge;if(next.challenge){$('login-code').textContent=next.challenge.code;$('login-link').href=next.challenge.url;}
  const job=next.job||{};$('progress-panel').hidden=!job.status;$('job-title').textContent=job.title||'';$('job-message').textContent=job.message||'';
  $('progress').max=job.total||1;if(job.total)$('progress').value=job.completed||0;else if(busy)$('progress').removeAttribute('value');else $('progress').value=job.status==='done'?1:0;
@@ -101,13 +111,13 @@ function render(next){state=next;const busy=['running','cancelling'].includes(ne
   for(const {row,bundle} of entries)for(const existing of row.status==='existing'?row.existing:[null]){const aid=existing?.account_id||row.account_id||'',project=bundle.projects?.[aid],capacity=existing?existing.capacity:row.capacity,tpm=existing?existing.tpm:row.estimated_tpm,rpm=existing?existing.rpm:row.estimated_rpm;const tr=document.createElement('tr');tr.innerHTML=`<td>${escapeHTML(row.subscription)}</td><td>${escapeHTML(regionNames[row.region]||row.region)}</td><td>${escapeHTML(row.model)}<small>${escapeHTML(existing?existing.version:row.version)} · ${escapeHTML(existing?existing.sku:row.sku)}</small></td><td>${escapeHTML(aid.split('/').pop()||'待确认')}<small>${escapeHTML(project?.name||(existing?'Project 未确认':'尚未确定'))}</small>${existing?'<small>部署：'+escapeHTML(existing.deployment)+'</small>':''}</td><td>${escapeHTML(capacity??'—')}<small>${tpm!=null?escapeHTML(Number(tpm).toLocaleString())+' TPM':rpm!=null?escapeHTML(Number(rpm).toLocaleString())+' RPM':'以 Azure 实际限流为准'}</small></td><td><span class="state ${row.status}">${({planned:'将创建',existing:'复用已有',blocked:'需要处理'})[row.status]||escapeHTML(row.status)}</span></td>`;if(row.message)tr.lastElementChild.append(detailButton(row.message,row.status!=='existing'));bodies.get(row.subscription_id).append(tr);}
  }
  const blocked=rows.filter(r=>r.status==='blocked').length+(plans.flatMap(b=>b.plan.errors||[]).length);$('review-summary').textContent=`${rows.filter(r=>r.status==='planned').length} 个待创建 · ${rows.filter(r=>r.status==='existing').length} 个复用`;
- const executable=plans.some(b=>!b.project_errors?.length&&b.plan.rows.some(r=>['planned','existing'].includes(r.status)));
+ const executable=plans.some(b=>b.plan.rows.some(r=>['planned','existing'].includes(r.status)));
  $('deploy').textContent=rows.some(r=>r.status==='planned')?'确认并创建缺失项':'获取已有部署结果';
- $('deploy').disabled=busy||!next.plan_id||!executable||settingsChanged;$('create-note').textContent=settingsChanged?'设置已变化，请重新检查。':blocked?'存在阻塞项，仅执行可用项；Project 不兼容的模型会跳过。':'核对清单后即可创建。';
+ $('deploy').disabled=busy||!next.plan_id||!executable||settingsChanged;$('create-note').textContent=settingsChanged?'设置已变化，请重新检查。':blocked?'存在需处理项，仅执行检查通过的订阅和区域。':'核对清单后即可创建。';
  const issues=next.issues||[];renderIssues('review-issues',issues);renderIssues('result-issues',issues);
  $('results-panel').hidden=!next.results?.length;$('read-keys').disabled=busy;$('export').disabled=!next.results?.length;
  const resultSig=JSON.stringify(next.results||[]);if(resultSig!==resultSignature){resultSignature=resultSig;const seen=new Set(),uniqueRows=(next.results||[]).filter(row=>{const key=row._account_id+'|'+row['资源'];if(seen.has(key))return false;seen.add(key);return true;});const columns=['订阅','订阅 ID','资源组','资源名称-foundry','区域','资源','url','密钥'],bodies=groupedTables($('result-groups'),uniqueRows,columns,items=>`${items.length} 个资源`);for(const row of uniqueRows){const tr=document.createElement('tr');for(const key of columns){const td=document.createElement('td');td.textContent=row[key]||'';if(key==='url'&&/^https:\/\//.test(row[key]||'')){const a=document.createElement('a');a.href=row[key];a.textContent=row[key];a.target='_blank';a.rel='noopener noreferrer';td.replaceChildren(a);}if(key==='密钥'&&row[key]==='••••••••'){const value=document.createElement('span');value.className='key-text';value.textContent=row[key];const show=document.createElement('button');show.className='key-button';show.textContent='显示';const copyButton=document.createElement('button');copyButton.className='key-button';copyButton.textContent='复制';const get=async()=>{const response=await api('reveal',{account_id:row._account_id});return (await response.json()).key;};show.onclick=async()=>{try{if(show.textContent==='隐藏'){value.textContent='••••••••';show.textContent='显示';}else{value.textContent=await get();show.textContent='隐藏';}}catch(e){error(e.message);}};copyButton.onclick=async()=>{try{await copy(await get());}catch(e){error(e.message);}};td.replaceChildren(value,show,copyButton);}tr.append(td);}bodies.get(row['订阅 ID']).append(tr);}}
- $('empty').hidden=plans.length>0||next.results?.length>0;
+ $('empty').hidden=!!next.connected||plans.length>0||next.results?.length>0;
 }
 let refreshing=false;
 async function refresh(){if(refreshing)return;refreshing=true;try{const response=await fetch('/api/state');if(!response.ok)throw new Error('会话已过期，请刷新页面重新连接。');const next=await response.json();if(next.plan_id&&next.plan_id!==state.plan_id)settingsChanged=scanRevision!==settingsRevision;render(next);}catch(e){error(e.message);}finally{refreshing=false;}}

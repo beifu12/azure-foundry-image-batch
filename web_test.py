@@ -49,6 +49,31 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_incompatible_subscription_does_not_stop_later_subscription(self):
+        second='22222222-2222-4222-8222-222222222222';second_aid=AID.replace(SID,second)
+        class Multiple(MemoryAzure):
+            def all(self,path,params=None):
+                if path=='/subscriptions':return [{'subscriptionId':s,'tenantId':TENANT,'state':'Enabled','displayName':'Azure Subscription '+str(i)} for i,s in enumerate([SID,second])]
+                if path.endswith('/accounts'):
+                    prefix=path.split('/providers/')[0]+'/'
+                    return [v for k,v in self.resources.items() if k.startswith(prefix) and v.get('kind') in ('AIServices','OpenAI')]
+                return super().all(path,params)
+        api=Multiple()
+        api.resources[AID]={'id':AID,'name':'cv-a03-001','kind':'OpenAI','location':'eastus2','properties':{'provisioningState':'Succeeded'}}
+        api.resources[second_aid]={'id':second_aid,'name':'cv-a03-001','kind':'AIServices','location':'eastus2','identity':{'principalId':'synthetic'},'properties':{'provisioningState':'Succeeded','allowProjectManagement':True}}
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':s} for s in [SID,second]]
+        data={'subscription_ids':[SID,second],'models':[{'name':'gpt-image-2','version':'2026-01-01'}],'regions':['eastus2'],'resource_group_template':'CV-{sub8}','account_template':'cv-{sub8}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):
+            web.start_scan(session,data);session.thread.join(3)
+            self.assertEqual([r['status'] for r in session.plans[0]['plan']['rows']],['blocked','planned'])
+            try:web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True})
+            except ValueError as error:self.fail('应继续可用订阅：'+str(error))
+            session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertTrue(any(p.startswith(second_aid+'/deployments/') for p in api.writes))
+        self.assertTrue(all('/subscriptions/'+second+'/' in p for p in api.writes))
+        self.assertEqual(session.results[0]['订阅 ID'],second)
+
     def test_legacy_reuse_does_not_validate_an_unused_project_name(self):
         aid=AID.rsplit('/',1)[0]+'/'+('a'*60)
         class Legacy(MemoryAzure):

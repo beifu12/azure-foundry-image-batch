@@ -47,6 +47,13 @@ class FakeAzure:
 
 
 class ScanTests(unittest.TestCase):
+    def test_explicitly_blocked_item_does_not_write_or_stop_later_items(self):
+        api=FakeAzure();config=configuration();plan=batch.scan(api,config)
+        report=batch.execute(api,plan,blocked={(SID,'eastus2'):'此订阅资源不支持 Project'})
+        self.assertEqual([r['status'] for r in report['rows']],['blocked','created'])
+        self.assertFalse(any('eastus2' in path for method,path in api.calls if method=='PUT'))
+        self.assertTrue(any('westus3' in path for method,path in api.calls if method=='PUT'))
+
     def existing_api(self,sku='DataZoneStandard',state='Succeeded'):
         account={'id':ACCOUNT,'location':'eastus2','kind':'OpenAI','properties':{'provisioningState':'Succeeded'}}
         deployment={'name':'customer-name','sku':{'name':sku,'capacity':4},'properties':{'provisioningState':state,'model':{'format':'OpenAI','name':'gpt-image-2','version':'old'},'rateLimits':[{'key':'request','count':4,'renewalPeriod':60}]}}

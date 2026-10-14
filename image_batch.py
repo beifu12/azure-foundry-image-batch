@@ -396,7 +396,7 @@ def account_result(account, deployment):
     return {'account_id':account['id'],'endpoint':props.get('endpoint'),'endpoints':props.get('endpoints',{}),'deployment':deployment.get('name'),'model':dp.get('model'), 'capacity':deployment.get('sku',{}).get('capacity'),'rpm':rpm(dp.get('rateLimits')),'tpm':tpm(dp.get('rateLimits')),'rate_limits':dp.get('rateLimits',[])}
 
 
-def execute(api, confirmed, on_progress=None):
+def execute(api, confirmed, on_progress=None, blocked=None):
     # Never trust an editable plan's resource IDs or capacity. Regenerate the
     # entire inventory, and stop if the reviewed rows no longer match.
     fresh = scan(api,confirmed['config'])
@@ -409,6 +409,10 @@ def execute(api, confirmed, on_progress=None):
         if not getattr(api,'quiet',False):print(f'[{index}/{len(fresh["rows"])}] {row["subscription"]} / {row["region"]}：{label}',flush=True)
         item = {**row};results.append(item)
         try:
+            reason=(blocked or {}).get((row['subscription_id'],row['region']))
+            if reason:
+                item.update(status='blocked',message=reason)
+                continue
             if row['status'] == 'existing':
                 item['outputs']=[]
                 for d in row['existing']:
