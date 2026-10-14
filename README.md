@@ -1,4 +1,14 @@
-# Azure 图像模型批量部署工具
+# Azure Foundry 模型部署工具
+
+## 客户网页与容器
+
+客户不熟悉脚本时，推荐使用独立的浏览器工作台。手动登录客户 Azure 账号，勾选订阅和模型，填写命名规则，检查后按按钮创建缺失项；无需安装 Azure CLI，也无需玖云 M365 账号。
+
+支持三个生图模型和七个文本模型的选择。模型是否可部署，以该订阅 Azure 实际目录、默认版本、配额和区域容量为准，不保证列出的模型在每个客户租户均已开放。
+
+网页默认使用 Azure 返回的默认版本；高级设置仍可以指定精确版本。新部署采用检查时确认的版本，不自动升级现有部署。`gpt-image-2` 候选区域限定为 East US 2、West US 3、Poland Central、Sweden Central、UAE North；其余模型独立查询各自区域。
+
+容器启动、Azure Container App 部署、登录策略、最大容量和客户 Excel 格式见 [客户网页使用说明](docs/WEB_GUIDE.md)。下文保留原有脚本方式，脚本仍要求明确填写版本。
 
 公共仓库：[beifu12/azure-foundry-image-batch](https://github.com/beifu12/azure-foundry-image-batch)。客户可以点击 **Code → Download ZIP**，或在 [发布页面](https://github.com/beifu12/azure-foundry-image-batch/releases/latest) 下载完整脚本包。
 
@@ -7,8 +17,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.0.2/azure-foundry-image-batch.zip -o image-batch-v1.0.2.zip
-unzip image-batch-v1.0.2.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.1.0/azure-foundry-image-batch.zip -o image-batch-v1.1.0.zip
+unzip image-batch-v1.1.0.zip
 cd azure-foundry-image-batch
 ```
 
@@ -94,7 +104,7 @@ Linux/macOS/Cloud Shell 的创建环境命令同样是 `python -m venv .venv`，
 
 版本和区域以扫描时 Azure API 为准。脚本不自动切换模型、不自动升级版本。
 
-命名模板支持 `{sub8}`（订阅 ID 前八位）、`{subscription}`（完整订阅 ID）、`{region}`。建议账户名同时包含订阅和区域，以减少全局名称冲突；客户可加公司前缀。
+命名模板支持 `{sub8}`（订阅 ID 前八位）、`{subscription}`（完整订阅 ID）、`{region}`、`{subcode}`（订阅名中的 A03 等编号，无编号时用 sub8）、`{index:03d}`（区域编号）。建议加入客户独有前缀。网页为同一订阅的所有已选模型统一编号；脚本单次扫描按区域顺序编号。
 
 ## 方式一：管理员直接部署
 

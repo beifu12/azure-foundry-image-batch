@@ -14,7 +14,7 @@ from uuid import UUID
 ARM = 'https://management.azure.com'
 GRAPH = 'https://graph.microsoft.com'
 VERSION = '2025-06-01'
-MODELS = ('gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst')
+MODELS = ('gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-6.1-sol')
 CONTRIBUTOR = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 OWNER = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
 
@@ -32,6 +32,8 @@ class Azure:
         self.host = host
         self.session = requests.Session()
 
+    def pause(self,seconds):time.sleep(seconds)
+
     def call(self, method, path, body=None, params=None, headers=None):
         url = self.host + path if path.startswith('/') else path
         if not url.startswith(self.host + '/') or urlsplit(url).netloc != urlsplit(self.host).netloc:
@@ -47,7 +49,7 @@ class Azure:
             if method == 'GET' and response.status_code in (429, 503) and attempt < 4:
                 wait = min(120, max(1, int(response.headers.get('Retry-After', 2**(attempt+1))) if response.headers.get('Retry-After','').isdigit() else 2**(attempt+1)))
                 print(f'Azure 限流/繁忙，{wait} 秒后重试读取…', flush=True)
-                time.sleep(wait)
+                self.pause(wait)
                 continue
             if not response.ok:
                 try: code = response.json().get('error', {}).get('code', 'AzureError')
@@ -172,9 +174,10 @@ def rpm(limits):
     return min(values) if values else None
 
 
-def render_name(template, sid, region, kind):
-    try: name = template.format(sub8=sid.replace('-','')[:8], subscription=sid, region=region)
-    except (KeyError, ValueError): raise ValueError('命名模板只支持 {sub8}、{subscription}、{region}。') from None
+def render_name(template, sid, region, kind, subscription_name='', index=1):
+    code=re.search(r'(?<![A-Za-z0-9])A\d+(?:-\d+)?(?![A-Za-z0-9])',subscription_name,re.I)
+    try: name = template.format(sub8=sid.replace('-','')[:8], subscription=sid, region=region,subcode=code.group().lower() if code else sid.replace('-','')[:8],index=index)
+    except (KeyError, ValueError): raise ValueError('命名模板支持 {sub8}、{subscription}、{region}、{subcode}、{index:03d}。') from None
     pattern = r'[a-z0-9][a-z0-9-]{1,62}[a-z0-9]' if kind == 'account' else r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}'
     if not re.fullmatch(pattern,name): raise ValueError(f'{kind} 命名无效：请使用合法字母、数字及连字符。')
     return name
@@ -246,7 +249,7 @@ def check_config(config):
                 str(UUID(sid))
         except ValueError:
             raise ValueError('subscription_ids 列表中每一项都必须是有效的订阅 UUID 字符串。') from None
-    if config.get('model') not in MODELS: raise ValueError('请选择 gpt-image-2、gpt-image-2.5-flare 或 gpt-image-2.5-sunburst。')
+    if config.get('model') not in MODELS: raise ValueError('请选择支持的生图或文本模型；可用性仍以 Azure 模型目录为准。')
     if config.get('sku') not in ('GlobalStandard','DataZoneStandard'): raise ValueError('仅支持 GlobalStandard / DataZoneStandard。')
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,40}',config.get('model_version','')): raise ValueError('须明确填写模型版本，不自动选取或升级版本。')
     for key in ('resource_group_template','account_template','deployment_name'):
@@ -276,13 +279,14 @@ def model_metadata(api, sid, region, config):
     return dict(usage_name=sku['usageName'],remaining=remaining,maximum=maximum,constraints=constraints,unit_rpm=rpm(sku.get('rateLimits')))
 
 
-def scan(api, config):
+def scan(api, config, on_progress=None):
     check_config(config)
     report = {'config':config,'tenant_id':config['tenant_id'],'rows':[],'errors':[], 'created_at':time.time()}
     subs = subscriptions(api,config)
     for index, sub in enumerate(subs,1):
+        if on_progress:on_progress(index-1,len(subs),'扫描订阅：'+sub.get('displayName',''))
         sid = sub['subscriptionId']; root = '/subscriptions/'+sid
-        print(f'[{index}/{len(subs)}] 扫描订阅：{sub.get("displayName",sid)}',flush=True)
+        if not getattr(api,'quiet',False):print(f'[{index}/{len(subs)}] 扫描订阅：{sub.get("displayName",sid)}',flush=True)
         try:
             accounts = api.all(root+'/providers/Microsoft.CognitiveServices/accounts')
             inventory = []
@@ -292,7 +296,14 @@ def scan(api, config):
                 if account.get('kind') in ('AIServices','OpenAI'):
                     for deployment in api.all(account['id']+'/deployments'):
                         if same_model(deployment, config['model'], config['sku']): inventory.append((account,deployment))
-            capacities = api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':config['model_version']})
+            versions=config.get('regional_versions',{}).get(sid,{})
+            if config.get('use_default') and not versions:raise ValueError('此订阅没有可确认的 Azure 默认版本；未安排创建。')
+            if versions:
+                capacities=[]
+                for version in dict.fromkeys(versions.values()):
+                    found=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':version})
+                    capacities.extend(r for r in found if versions.get(r.get('location','').replace(' ','').lower())==version)
+            else:capacities=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':config['model_version']})
             regions = {r['location'].replace(' ','').lower(): r for r in capacities if r.get('properties',{}).get('skuName') == config['sku']}
             requested = config.get('regions','auto')
             if requested != 'auto':
@@ -302,8 +313,9 @@ def scan(api, config):
                 regions = {r:regions[r] for r in dict.fromkeys(requested) if r in regions}
             if not regions: raise ValueError('该订阅当前没有匹配模型版本/类型的可用区域。')
             pending = []
-            for region, raw_capacity in sorted(regions.items()):
-                row = dict(subscription_id=sid, subscription=sub.get('displayName',sid), region=region, model=config['model'], version=config['model_version'],sku=config['sku'])
+            for region_index, (region, raw_capacity) in enumerate(regions.items() if requested != 'auto' else sorted(regions.items()),1):
+                region_index=config.get('region_indexes',{}).get(sid,{}).get(region,region_index)
+                row = dict(subscription_id=sid, subscription=sub.get('displayName',sid), region=region, region_index=region_index, model=config['model'], version=versions.get(region,config['model_version']),sku=config['sku'])
                 report['rows'].append(row)
                 try:
                     existing = [(a,d) for a,d in inventory if a['location'].replace(' ','').lower() == region]
@@ -312,21 +324,21 @@ def scan(api, config):
                             raise ValueError('已有同模型部署或账户尚未成功；请先检查失败/进行中的配置，不重复创建。')
                         row.update(status='existing', existing=[{'account_id':a['id'],'deployment':d['name'],'version':d.get('properties',{}).get('model',{}).get('version'),'capacity':d.get('sku',{}).get('capacity')} for a,d in existing])
                         continue
-                    row.update(model_metadata(api,sid,region,config))
+                    row.update(model_metadata(api,sid,region,{**config,'model_version':row['version']}))
                     row['maximum'] = allowed_capacity(min(row['maximum'],integer(raw_capacity['properties'].get('availableCapacity'))),row['constraints'])
-                    group = render_name(config['resource_group_template'],sid,region,'group')
-                    name = render_name(config['account_template'],sid,region,'account')
+                    group = render_name(config['resource_group_template'],sid,region,'group',sub.get('displayName',''),region_index)
+                    name = render_name(config['account_template'],sid,region,'account',sub.get('displayName',''),region_index)
                     desired = root+'/resourceGroups/'+group+'/providers/Microsoft.CognitiveServices/accounts/'+name
                     candidates = [a for a in accounts if a.get('kind') in ('AIServices','OpenAI') and a.get('location','').replace(' ','').lower() == region]
                     named = [a for a in candidates if a['id'].lower() == desired.lower()]
                     if named: candidates=named
                     if len(candidates)>1: raise ValueError('区域已有多个 Foundry/OpenAI 账户；请用命名规则明确选中其中一个，避免创建重复账户。')
                     if candidates: desired=candidates[0]['id'];group=desired.split('/')[4]
-                    row.update(account_id=desired,resource_group=group,new_account=not candidates,deployment=render_name(config['deployment_name'],sid,region,'deployment'))
+                    row.update(account_id=desired,resource_group=group,new_account=not candidates,deployment=render_name(config['deployment_name'],sid,region,'deployment',sub.get('displayName',''),region_index))
                     if config.get('quota_scope','unknown') == 'unknown':
                         row.update(status='blocked',message='已扫描最大容量，但配额是否跨区域共享尚未确认。请确认 quota_scope 后重扫。')
                         continue
-                    row['pool'] = quota_pool(config['quota_scope'],region,config.get('data_zones',{}))
+                    row['pool'] = row['usage_name']+':'+quota_pool(config['quota_scope'],region,config.get('data_zones',{}))
                     row['status']='planned';pending.append(row)
                 except (ValueError,RuntimeError) as error: row.update(status='blocked',message=str(error))
             for row, capacity in zip(pending,allocate(pending)):
@@ -334,6 +346,7 @@ def scan(api, config):
                 if not capacity: row.update(status='blocked',message='合法剩余额度不足；不会创建零容量部署。')
         except (ValueError,RuntimeError) as error:
             report['errors'].append({'subscription_id':sid,'message':str(error)})
+        if on_progress:on_progress(index,len(subs),'订阅检查完成：'+sub.get('displayName',''))
     return report
 
 
@@ -344,7 +357,7 @@ def wait_ready(api, path, timeout=900):
         state = value.get('properties',{}).get('provisioningState')
         if state == 'Succeeded': return value
         if state in ('Failed','Canceled','Deleted'): raise RuntimeError('Azure 配置操作失败；重新扫描后检查失败资源，不会自动删除。')
-        time.sleep(5)
+        getattr(api,'pause',time.sleep)(5)
     raise RuntimeError('等待 Azure 操作超时；结果可能已创建，请重新扫描确认，不要直接重试写入。')
 
 
@@ -364,7 +377,7 @@ def execute(api, confirmed, on_progress=None):
     report={'tenant_id':fresh['tenant_id'],'rows':results,'errors':fresh['errors']}
     for index, row in enumerate(fresh['rows'],1):
         label={'planned':'准备创建','existing':'已有部署','blocked':'需要处理'}.get(row['status'],row['status'])
-        print(f'[{index}/{len(fresh["rows"])}] {row["subscription"]} / {row["region"]}：{label}',flush=True)
+        if not getattr(api,'quiet',False):print(f'[{index}/{len(fresh["rows"])}] {row["subscription"]} / {row["region"]}：{label}',flush=True)
         item = {**row};results.append(item)
         try:
             if row['status'] == 'existing':
@@ -390,7 +403,7 @@ def execute(api, confirmed, on_progress=None):
                 if account.get('properties',{}).get('provisioningState')!='Succeeded': raise ValueError('现有账户尚未配置成功。')
             # Check quota again after long-running account creation. The planned
             # capacity stays fixed; shared quota is also checked conservatively.
-            remaining=model_metadata(api,row['subscription_id'],row['region'],fresh['config'])
+            remaining=model_metadata(api,row['subscription_id'],row['region'],{**fresh['config'],'model_version':row['version']})
             if row['capacity']>remaining['maximum']: raise ValueError('当前剩余合法容量低于确认值；未创建部署，请重扫。')
             api.put(did,{'sku':{'name':row['sku'],'capacity':row['capacity']},'properties':{'model':{'format':'OpenAI','name':row['model'],'version':row['version']},'versionUpgradeOption':'NoAutoUpgrade'}})
             deployed=wait_ready(api,did)

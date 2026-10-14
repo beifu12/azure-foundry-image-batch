@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.txt
+!image_batch.py
+!app_setup.py
+!web_app.py
+!web/
+!web/**

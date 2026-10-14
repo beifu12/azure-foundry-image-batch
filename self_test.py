@@ -47,6 +47,19 @@ class FakeAzure:
 
 
 class ScanTests(unittest.TestCase):
+    def test_text_models_are_valid_selections_without_inventing_versions(self):
+        for model in ('gpt-5.6-terra','gpt-5.6-luna','gpt-5.6-sol'):
+            config=configuration();config['model']=model
+            batch.check_config(config)
+
+    def test_customer_names_support_subscription_code_and_region_index(self):
+        self.assertEqual(batch.render_name('cv-{subcode}-{index:03d}',SID,'eastus2','account','Azure Subscription A03',2),'cv-a03-002')
+
+    def test_scan_reports_real_subscription_progress(self):
+        events=[]
+        batch.scan(FakeAzure(),configuration(),on_progress=lambda *event:events.append(event))
+        self.assertEqual([e[:2] for e in events],[(0,1),(1,1)])
+
     def test_scan_reads_only_and_allocates_remaining(self):
         api=FakeAzure();report=batch.scan(api,configuration())
         self.assertEqual([r['capacity'] for r in report['rows']],[2,2])

@@ -7,7 +7,8 @@ SOURCE=Path(__file__).resolve().parent
 FILES=('image_batch.py','app_setup.py','package_release.py','README.md',
        'config.example.json','requirements.txt','.gitignore','self_test.py',
        'AGENTS.md','docs/AGENT_GUIDE.md','docs/TROUBLESHOOTING.md',
-       '.github/workflows/test.yml')
+       '.github/workflows/test.yml','web_app.py','web_test.py','web/index.html',
+       'web/app.js','web/style.css','Dockerfile','.dockerignore','compose.yaml','docs/WEB_GUIDE.md')
 
 
 def build_package(destination):
