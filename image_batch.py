@@ -154,9 +154,9 @@ def allocate(rows):
     return values
 
 
-def same_model(deployment, name, sku):
+def same_model(deployment, name, sku=None):
     model = deployment.get('properties', {}).get('model', {})
-    return model.get('name') == name and model.get('format') == 'OpenAI' and deployment.get('sku', {}).get('name') == sku
+    return model.get('name') == name and model.get('format') == 'OpenAI' and (sku is None or deployment.get('sku', {}).get('name') == sku)
 
 
 def quota_pool(scope, region, zones):
@@ -315,23 +315,24 @@ def scan(api, config, on_progress=None):
             for account in accounts:
                 if account.get('kind') in ('AIServices','OpenAI'):
                     for deployment in api.all(account['id']+'/deployments'):
-                        if same_model(deployment, config['model'], config['sku']): inventory.append((account,deployment))
+                        if same_model(deployment, config['model']): inventory.append((account,deployment))
             versions=config.get('regional_versions',{}).get(sid,{})
-            if config.get('use_default') and not versions:raise ValueError('此订阅没有可确认的 Azure 默认版本；未安排创建。')
-            if versions:
-                capacities=[]
-                for version in dict.fromkeys(versions.values()):
-                    found=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':version})
-                    capacities.extend(r for r in found if versions.get(r.get('location','').replace(' ','').lower())==version)
-            else:capacities=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':config['model_version']})
+            capacities=[];capacity_error=''
+            try:
+                if versions:
+                    for version in dict.fromkeys(versions.values()):
+                        found=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':version})
+                        capacities.extend(r for r in found if versions.get(r.get('location','').replace(' ','').lower())==version)
+                elif not config.get('use_default'):capacities=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':config['model_version']})
+            except (ValueError,RuntimeError) as error:capacity_error=str(error)
             regions = {r['location'].replace(' ','').lower(): r for r in capacities if r.get('properties',{}).get('skuName') == config['sku']}
             requested = config.get('regions','auto')
             if requested != 'auto':
                 if not isinstance(requested,list) or not requested: raise ValueError('regions 必须是 auto 或非空区域列表。')
-                for region in requested:
-                    if region not in regions: report['errors'].append({'subscription_id':sid,'region':region,'message':'此区域未返回匹配模型容量；未计划创建。'})
-                regions = {r:regions[r] for r in dict.fromkeys(requested) if r in regions}
-            if not regions: raise ValueError('该订阅当前没有匹配模型版本/类型的可用区域。')
+                regions = {r:regions.get(r) for r in dict.fromkeys(requested)}
+            else:
+                for account,_ in inventory:regions.setdefault(account['location'].replace(' ','').lower(),None)
+            if not regions: raise ValueError(capacity_error or '该订阅当前没有匹配模型版本/类型的可用区域。')
             pending = []
             for region_index, (region, raw_capacity) in enumerate(regions.items() if requested != 'auto' else sorted(regions.items()),1):
                 region_index=config.get('region_indexes',{}).get(sid,{}).get(region,region_index)
@@ -342,11 +343,18 @@ def scan(api, config, on_progress=None):
                     if existing:
                         if any(a.get('properties',{}).get('provisioningState')!='Succeeded' or d.get('properties',{}).get('provisioningState')!='Succeeded' for a,d in existing):
                             raise ValueError('已有同模型部署或账户尚未成功；请先检查失败/进行中的配置，不重复创建。')
-                        row.update(status='existing', existing=[{'account_id':a['id'],'deployment':d['name'],'version':d.get('properties',{}).get('model',{}).get('version'),'capacity':d.get('sku',{}).get('capacity')} for a,d in existing])
+                        row.update(status='existing', existing=[{'account_id':a['id'],'deployment':d['name'],'version':d.get('properties',{}).get('model',{}).get('version'),'sku':d.get('sku',{}).get('name'),'capacity':d.get('sku',{}).get('capacity'),'rpm':rpm(d.get('properties',{}).get('rateLimits')),'tpm':tpm(d.get('properties',{}).get('rateLimits'))} for a,d in existing])
+                        row['message']='已有同模型部署，保留实际版本、部署类型和容量；不新建、不扩容。'
                         continue
+                    if raw_capacity is None and not capacity_error:
+                        report['rows'].pop()
+                        report['errors'].append({'subscription_id':sid,'region':region,'message':'此区域未返回匹配模型容量；未计划创建。'})
+                        continue
+                    if config.get('use_default') and region not in versions:raise ValueError('此区域没有可确认的 Azure 默认版本；未安排创建。')
+                    if raw_capacity is None:raise ValueError(capacity_error or '此区域未返回匹配模型容量；未计划创建。')
                     row.update(model_metadata(api,sid,region,{**config,'model_version':row['version']}))
                     row['maximum'] = allowed_capacity(min(row['maximum'],integer(raw_capacity['properties'].get('availableCapacity'),'区域可用容量 availableCapacity')),row['constraints'])
-                    if not row['maximum']:raise ValueError('此区域剩余配额、可用容量或 Tier 1 目标内合法容量为 0；不会创建零容量部署。')
+                    if not row['maximum']:raise ValueError('未找到此区域可复用的同模型部署，且剩余配额、可用容量或目标内合法容量为 0；不会新建。')
                     group = render_name(config['resource_group_template'],sid,region,'group',sub.get('displayName',''),region_index)
                     name = render_name(config['account_template'],sid,region,'account',sub.get('displayName',''),region_index)
                     desired = root+'/resourceGroups/'+group+'/providers/Microsoft.CognitiveServices/accounts/'+name
@@ -405,7 +413,7 @@ def execute(api, confirmed, on_progress=None):
                 item['outputs']=[]
                 for d in row['existing']:
                     account=api.get(d['account_id']);deployed=api.get(d['account_id']+'/deployments/'+d['deployment'])
-                    if account.get('properties',{}).get('provisioningState')!='Succeeded' or deployed.get('properties',{}).get('provisioningState')!='Succeeded' or not same_model(deployed,row['model'],row['sku']):raise ValueError('已有账户/部署状态已改变；请重新扫描。')
+                    if account.get('properties',{}).get('provisioningState')!='Succeeded' or deployed.get('properties',{}).get('provisioningState')!='Succeeded' or not same_model(deployed,row['model'],d['sku']):raise ValueError('已有账户/部署状态已改变；请重新扫描。')
                     item['outputs'].append(account_result(account,deployed))
                 continue
             if row['status'] != 'planned': continue

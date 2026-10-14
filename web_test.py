@@ -26,6 +26,7 @@ class MemoryAzure:
         if path.endswith('/locations'):return [{'name':name} for name in ('eastus','eastus2','westus3')]
         if path.endswith('/accounts'):return [v for k,v in self.resources.items() if k.endswith('/'+v.get('name','')) and v.get('kind')=='AIServices']
         if path.endswith('/deployments'):return [v for k,v in self.resources.items() if k.startswith(path+'/')]
+        if path.endswith('/projects'):return [v for k,v in self.resources.items() if k.startswith(path+'/')]
         if path.endswith('/modelCapacities'):
             locations=['eastus2','westus3'] if params['modelName']=='gpt-image-2' else ['eastus','eastus2','westus3']
             return [{'location':r,'properties':{'skuName':'GlobalStandard','availableCapacity':1}} for r in locations]
@@ -48,6 +49,75 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_legacy_reuse_does_not_validate_an_unused_project_name(self):
+        aid=AID.rsplit('/',1)[0]+'/'+('a'*60)
+        class Legacy(MemoryAzure):
+            def all(self,path,params=None):
+                if path.endswith('/accounts'):return [self.resources[aid]]
+                return super().all(path,params)
+        api=Legacy();api.resources[aid]={'id':aid,'name':'a'*60,'kind':'OpenAI','location':'eastus2','properties':{'provisioningState':'Succeeded'}}
+        did=aid+'/deployments/image'
+        api.resources[did]={'id':did,'name':'image','sku':{'name':'GlobalStandard','capacity':2},'properties':{'provisioningState':'Succeeded','model':{'name':'gpt-image-2','format':'OpenAI','version':'old'}}}
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-01-01'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):web.start_scan(session,data);session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(session.plans[0]['plan']['rows'][0]['status'],'existing')
+        self.assertEqual(api.writes,[])
+
+    def test_auto_regions_capacity_failure_still_allows_existing_model_inventory(self):
+        class BrokenCapacity(MemoryAzure):
+            def all(self,path,params=None):
+                if path.endswith('/modelCapacities'):raise ValueError('invalid Azure capacity response')
+                return super().all(path,params)
+        api=BrokenCapacity();api.resources[AID]={'id':AID,'name':'cv-a03-001','kind':'AIServices','location':'eastus2','properties':{'provisioningState':'Succeeded'}}
+        did=AID+'/deployments/text'
+        api.resources[did]={'id':did,'name':'text','sku':{'name':'GlobalStandard','capacity':2},'properties':{'provisioningState':'Succeeded','model':{'name':'gpt-6-sol','format':'OpenAI','version':'old'}}}
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-6-sol','version':''}],'regions':[],'auto_regions':True,'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):web.start_scan(session,data);session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(session.plans[0]['plan']['rows'][0]['status'],'existing')
+        self.assertEqual(api.writes,[])
+
+    def test_existing_openai_deployment_is_reused_without_creating_project(self):
+        class Legacy(MemoryAzure):
+            def all(self,path,params=None):
+                if path.endswith('/accounts'):return [self.resources[AID]]
+                return super().all(path,params)
+        api=Legacy()
+        api.resources[AID]={'id':AID,'name':'cv-a03-001','kind':'OpenAI','location':'eastus2','properties':{'provisioningState':'Succeeded','endpoint':'https://example.invalid'}}
+        did=AID+'/deployments/old-image'
+        api.resources[did]={'id':did,'name':'old-image','sku':{'name':'DataZoneStandard','capacity':2},'properties':{'provisioningState':'Succeeded','model':{'name':'gpt-image-2','format':'OpenAI','version':'old'},'rateLimits':[{'key':'request','count':2,'renewalPeriod':60}]}}
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-01-01'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):
+            web.start_scan(session,data);session.thread.join(3)
+            self.assertEqual(session.job['status'],'done',session.job)
+            self.assertEqual(session.plans[0]['plan']['rows'][0]['status'],'existing')
+            web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True});session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(api.writes,[])
+        self.assertEqual(session.results[0]['deployment'],'old-image')
+        self.assertEqual(session.results[0]['资源'],'')
+
+    def test_existing_project_with_different_name_is_reused_without_writes(self):
+        api=MemoryAzure()
+        api.resources[AID]={'id':AID,'name':'cv-a03-001','kind':'AIServices','location':'eastus2','properties':{'provisioningState':'Succeeded','allowProjectManagement':True}}
+        did=AID+'/deployments/customer-image'
+        api.resources[did]={'id':did,'name':'customer-image','sku':{'name':'GlobalStandard','capacity':2},'properties':{'provisioningState':'Succeeded','model':{'name':'gpt-image-2','format':'OpenAI','version':'old'}}}
+        pid=AID+'/projects/customer-project'
+        api.resources[pid]={'id':pid,'name':'customer-project','properties':{'provisioningState':'Succeeded'}}
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':''}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):
+            web.start_scan(session,data);session.thread.join(3)
+            self.assertEqual(session.plans[0]['projects'][AID]['name'],'customer-project')
+            web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True});session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(session.results[0]['资源'],'customer-project')
+        self.assertEqual(api.writes,[])
+
     def test_default_quota_mode_does_not_require_manual_scope_confirmation(self):
         session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
         data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-04-21'}],'regions':['eastus2'],'resource_group_template':'rg-{sub8}','account_template':'ai-{sub8}-{region}','project_template':'{foundry}-project'}

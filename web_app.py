@@ -290,8 +290,7 @@ def start_scan(session,data):
                         key=(sid,region)
                         if key not in catalog_cache:catalog_cache[key]=api.all(f'/subscriptions/{sid}/providers/Microsoft.CognitiveServices/locations/{region}/models')
                         regional[sid][region]=default_version(catalog_cache[key],config['model'],config['sku'])
-                    except batch.AzureError:continue
-                    except ValueError:continue
+                    except (ValueError,RuntimeError):continue
                     finally:
                         defaults_done+=1;progress(session,defaults_done,defaults_total,config['model']+' / '+region+' 默认版本已检查','默认版本')
                 if not regional[sid]:issues.append(config['model']+'：所选订阅没有可确认的 Azure 默认版本，请指定版本后重新检查。')
@@ -306,7 +305,7 @@ def start_scan(session,data):
                         capacities=api.all(f'/subscriptions/{sid}/providers/Microsoft.CognitiveServices/modelCapacities',{'api-version':batch.VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':config['model_version']})
                         discovered=sorted({row['location'].replace(' ','').lower() for row in capacities if row.get('properties',{}).get('skuName')==config['sku']})
                         discovered.extend(r for r in config.get('regional_versions',{}).get(sid,{}) if r not in discovered)
-                    except batch.AzureError:discovered=[]
+                    except (ValueError,RuntimeError):discovered=[]
                 else:discovered=config['regions']
                 order.extend(region for region in discovered if region not in order)
                 numbering_done+=1;progress(session,numbering_done,total,config['model']+' 区域容量已检查','区域容量')
@@ -314,15 +313,26 @@ def start_scan(session,data):
         for config in configs:config['region_indexes']=indexes
         progress(session,0,total,'检查现有部署和配额','资源检查')
         for i,config in enumerate(configs):
-            if config['model_version']=='AzureDefault':
-                plan={'config':config,'rows':[],'errors':[{'message':'无法确认 Azure 默认版本；未安排创建。'}]}
-                bundles.append({'plan':plan,'authoritative':plan,'projects':{},'project_errors':[]});continue
             plan=batch.scan(api,config,on_progress=lambda done,count,label:progress(session,i*count+done,total,config['model']+' · '+label))
             authoritative=copy.deepcopy(plan);projects={};project_errors=[]
             for row in plan['rows']:
                 if row['status'] not in ('existing','planned'):continue
                 aids=[d['account_id'] for d in row['existing']] if row['status']=='existing' else [row['account_id']]
                 for aid in dict.fromkeys(aids):
+                    if row['status']=='existing':
+                        projects[aid]={'name':'','new':False}
+                        parent=api.get(aid)
+                        if parent.get('kind')=='AIServices' and parent.get('properties',{}).get('allowProjectManagement'):
+                            try:
+                                try:name=project_name(template,row,aid)
+                                except ValueError:name=''
+                                available=[p for p in api.all(aid+'/projects') if p.get('properties',{}).get('provisioningState')=='Succeeded']
+                                matched=[p for p in available if p.get('name')==name]
+                                chosen=matched or (available if len(available)==1 else [])
+                                if chosen:projects[aid]['name']=chosen[0]['name']
+                            except (ValueError,RuntimeError):
+                                row['message']+=' Project 信息读取未完成；不创建或修改 Project。'
+                        continue
                     name=project_name(template,row,aid);path=aid+'/projects/'+name
                     new_parent=row.get('new_account',False)
                     if not new_parent:
@@ -410,7 +420,8 @@ def start_deploy(session,data):
                 for output in row.get('outputs',[]):
                     aid=output['account_id'];project=bundle['projects'][aid]['name'];project_state=''
                     owned_accounts.add(aid)
-                    try:ensure_project(api,aid,project,row['region'])
+                    try:
+                        if row['status']!='existing':ensure_project(api,aid,project,row['region'])
                     except (batch.AzureError,ValueError,RuntimeError):
                         project_state='Project 配置失败；请重新检查。';issues.append(row['subscription']+' / '+row['region']+'：'+project_state)
                     result[(aid,output['deployment'])]=result_row(row,output,project if not project_state else '',project_state or row['status'])

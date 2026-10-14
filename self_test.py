@@ -47,6 +47,60 @@ class FakeAzure:
 
 
 class ScanTests(unittest.TestCase):
+    def existing_api(self,sku='DataZoneStandard',state='Succeeded'):
+        account={'id':ACCOUNT,'location':'eastus2','kind':'OpenAI','properties':{'provisioningState':'Succeeded'}}
+        deployment={'name':'customer-name','sku':{'name':sku,'capacity':4},'properties':{'provisioningState':state,'model':{'format':'OpenAI','name':'gpt-image-2','version':'old'},'rateLimits':[{'key':'request','count':4,'renewalPeriod':60}]}}
+        class Existing(FakeAzure):
+            def get(self,path,version=None):
+                self.calls.append(('GET',path))
+                return deployment if '/deployments/' in path else account
+        api=Existing([account],[deployment]);api.remaining=0
+        return api
+
+    def test_existing_other_sku_with_zero_quota_is_reused_without_writes(self):
+        api=self.existing_api();config=configuration();config['regions']=['eastus2']
+        plan=batch.scan(api,config)
+        self.assertEqual(plan['rows'][0]['status'],'existing')
+        self.assertEqual(plan['rows'][0]['existing'][0]['sku'],'DataZoneStandard')
+        report=batch.execute(api,plan)
+        self.assertEqual(report['rows'][0]['status'],'existing')
+        self.assertEqual(report['rows'][0]['outputs'][0]['capacity'],4)
+        self.assertTrue(all(method=='GET' for method,_ in api.calls))
+        self.assertFalse(any(path.endswith('/usages') for _,path in api.calls))
+
+    def test_existing_deployment_is_reused_when_new_model_capacity_is_absent(self):
+        api=self.existing_api('GlobalStandard');original=api.all
+        api.all=lambda path,params=None:[] if path.endswith('/modelCapacities') else original(path,params)
+        config=configuration();config['regions']=['eastus2']
+        report=batch.scan(api,config)
+        self.assertEqual(len(report['rows']),1)
+        self.assertEqual(report['rows'][0]['status'],'existing')
+        self.assertEqual(report['errors'],[])
+
+    def test_capacity_read_failure_does_not_hide_existing_or_allow_new_creation(self):
+        api=self.existing_api('GlobalStandard');original=api.all
+        def read(path,params=None):
+            if path.endswith('/modelCapacities'):raise batch.AzureError(429)
+            return original(path,params)
+        api.all=read;config=configuration();config['regions']=['eastus2','westus3']
+        report=batch.scan(api,config)
+        self.assertEqual([r['status'] for r in report['rows']],['existing','blocked'])
+        self.assertIn('429',report['rows'][1]['message'])
+
+    def test_failed_existing_other_sku_blocks_instead_of_creating_duplicate(self):
+        api=self.existing_api(state='Failed');api.remaining=2
+        config=configuration();config['regions']=['eastus2']
+        row=batch.scan(api,config)['rows'][0]
+        self.assertEqual(row['status'],'blocked')
+        self.assertIn('不重复创建',row['message'])
+
+    def test_existing_model_does_not_require_catalog_default_or_new_quota(self):
+        api=self.existing_api('GlobalStandard');config=configuration()
+        config.update(regions=['eastus2'],use_default=True,model_version='AzureDefault',regional_versions={SID:{}})
+        row=batch.scan(api,config)['rows'][0]
+        self.assertEqual(row['status'],'existing')
+        self.assertEqual(row['existing'][0]['version'],'old')
+
     def test_auto_quota_check_plans_without_manual_scope_confirmation(self):
         config=configuration();config['quota_scope']='auto'
         rows=batch.scan(FakeAzure(),config)['rows']

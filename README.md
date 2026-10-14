@@ -17,8 +17,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.1/azure-foundry-image-batch.zip -o image-batch-v1.2.1.zip
-unzip image-batch-v1.2.1.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.2/azure-foundry-image-batch.zip -o image-batch-v1.2.2.zip
+unzip image-batch-v1.2.2.zip
 cd azure-foundry-image-batch
 ```
 
@@ -34,7 +34,7 @@ cd azure-foundry-image-batch
 
 - 扫描指定租户下当前身份可访问、状态为 Enabled 的订阅；默认全选。不可访问的订阅不在扫描范围，不能承诺枚举租户全部订阅。
 - 查询 Foundry/Azure OpenAI 账户、现有部署、模型版本、可用区域和容量。某个账户部署列表读取失败时，不把它当作空账户；该订阅记录失败。
-- 同订阅、同区域已有同模型、同部署类型时跳过，即使版本或命名不同也不会再创建。不升级、不扩容、不更换现有部署。失败或尚在创建的部署列为阻塞，须先检查处理。
+- 同订阅、同区域已有同模型时优先复用，即使部署类型、版本或命名不同也不会再创建。复用不依赖新建容量或剩余额度，输出实际部署类型、版本与容量。不升级、不扩容、不更换现有部署。失败或尚在创建的部署列为阻塞，读取失败时不能假定不存在。
 - 命名由客户配置；区域已有一个可复用账户时使用它，已有多个时要求客户明确命名，不随机选取。
 - 在生图 2 RPM／文本 1,000,000 TPM 目标内，从真实剩余配额、SKU 约束和平台可用容量计算合法分配。余额不足时可能低于目标；区域独立额度各区分别分配，共享额度在同一个池内分配，不重复乘以区域数量。
 - 执行前重新扫描，与已确认清单比较。状态或配额改变时要求重扫；长时间创建账户后再次检查额度。
