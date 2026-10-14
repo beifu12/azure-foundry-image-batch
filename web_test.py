@@ -2,6 +2,7 @@
 import io
 import json
 import threading
+import time
 import unittest
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError
@@ -47,6 +48,47 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_cancel_invalidates_pending_browser_authorization(self):
+        session=web.Session();session.login_generation=2;session.oauth={'flow':{'state':'synthetic-state'}};session.login_url='https://login.microsoftonline.com/'
+        web.cancel_job(session)
+        self.assertIsNone(session.oauth);self.assertEqual(session.login_url,'');self.assertEqual(session.login_generation,3)
+
+    def test_browser_callback_reads_subscriptions_without_resource_writes(self):
+        session=web.Session();session.login_generation=1;client=Mock();client.acquire_token_by_auth_code_flow.return_value={'access_token':'synthetic-token'}
+        session.oauth={'client':client,'flow':{'state':'synthetic-state'},'expires':time.monotonic()+60,'expected_tenant':TENANT,'generation':1}
+        credential=Mock();credential.tenant=TENANT;api=MemoryAzure()
+        with patch.object(web,'BrowserCredential',return_value=credential),patch.object(web,'JobAzure',return_value=api):
+            web.finish_browser_login(session,{'state':'synthetic-state','code':'synthetic-code'});session.thread.join(3)
+        self.assertEqual(session.job['status'],'done');self.assertEqual(session.subscriptions[0]['subscriptionId'],SID)
+        self.assertIs(session.credential,credential);self.assertEqual(api.writes,[])
+
+    def test_logout_during_browser_redemption_cannot_restore_connection(self):
+        session=web.Session();client=Mock();session.oauth={'client':client,'flow':{'state':'synthetic-state'},'expires':time.monotonic()+60,'generation':0}
+        def redeem(*args):session.login_generation+=1;return {'access_token':'synthetic-token'}
+        client.acquire_token_by_auth_code_flow.side_effect=redeem
+        with patch.object(web,'BrowserCredential',return_value=Mock()):
+            with self.assertRaises(ValueError):web.finish_browser_login(session,{'state':'synthetic-state','code':'synthetic-code'})
+        self.assertIsNone(session.api);self.assertIsNone(session.credential)
+
+    def test_browser_login_uses_original_arm_delegated_scope(self):
+        session=web.Session();client=Mock();client.initiate_auth_code_flow.return_value={'state':'synthetic-state','auth_uri':'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize'}
+        with patch.object(web,'oauth_client',return_value=client),patch.dict('os.environ',{'OAUTH_CLIENT_ID':SID,'OAUTH_CLIENT_SECRET':'synthetic-secret'}):
+            web.start_login(session,{'tenant_id':''});session.thread.join(3)
+        self.assertEqual(client.initiate_auth_code_flow.call_args.args[0],['https://management.azure.com/user_impersonation'])
+        self.assertTrue(session.login_url.startswith('https://login.microsoftonline.com/'))
+        self.assertNotIn('synthetic-secret',str(session.snapshot()))
+
+    def test_browser_callback_is_browser_bound_and_single_use(self):
+        first=web.Session();second=web.Session();client=Mock()
+        first.oauth={'client':client,'flow':{'state':'synthetic-state'},'expires':time.monotonic()+60,'expected_tenant':None}
+        with self.assertRaises(ValueError):web.finish_browser_login(second,{'state':'synthetic-state','code':'synthetic-code'})
+        with self.assertRaises(ValueError):web.finish_browser_login(first,{'state':'different','code':'synthetic-code'})
+        client.acquire_token_by_auth_code_flow.return_value={'error':'access_denied','error_description':'secret=never-echo'}
+        with self.assertRaises(ValueError) as failure:web.finish_browser_login(first,{'state':'synthetic-state','code':'synthetic-code'})
+        self.assertNotIn('never-echo',str(failure.exception));self.assertIsNone(first.oauth)
+        with self.assertRaises(ValueError):web.finish_browser_login(first,{'state':'synthetic-state','code':'synthetic-code'})
+        self.assertEqual(client.acquire_token_by_auth_code_flow.call_count,1)
+
     def test_logout_between_login_check_and_commit_cannot_restore_credential(self):
         session=web.Session();gate={'commit':False};original=session.lock
         class LogoutAtCommit:
@@ -199,9 +241,25 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(response.headers['Cache-Control'],'no-store')
             self.assertFalse(json.load(response)['connected'])
 
+    def test_invalid_callback_cannot_release_running_job_guard(self):
+        cookie=self.bootstrap();session=self.server.sessions[cookie.split('=',1)[1]]
+        session.job={'status':'running','title':'deployment'}
+        with urlopen(Request(self.origin+'/auth/callback?state=invalid',headers={'Cookie':cookie})) as response:response.read()
+        self.assertEqual(session.job['status'],'running')
+        with self.assertRaises(ValueError):web.start(session,'second',lambda event:None)
+
     def test_unused_anonymous_sessions_cannot_permanently_fill_capacity(self):
         with self.server.sessions_lock:
+            self.server.sessions.clear()
             for i in range(256):self.server.sessions['unused-'+str(i)]=web.Session()
+        self.bootstrap()
+
+    def test_uncompleted_browser_logins_cannot_permanently_fill_capacity(self):
+        with self.server.sessions_lock:
+            self.server.sessions.clear()
+            for i in range(256):
+                session=web.Session();session.oauth={'expires':time.monotonic()+60 if i%2 else time.monotonic()-1};session.job={'status':'done'}
+                self.server.sessions['pending-'+str(i)]=session
         self.bootstrap()
 
     def test_cross_origin_write_is_rejected_before_body_read(self):
@@ -225,6 +283,7 @@ class HTTPTests(unittest.TestCase):
         with patch.object(web,'PUBLIC_ORIGIN','https://workspace.example.invalid'):
             with urlopen(Request(self.origin+'/',headers={'Host':'workspace.example.invalid'})) as response:
                 cookie=response.headers['Set-Cookie'];self.assertIn('; Secure',cookie)
+                self.assertIn('SameSite=Lax',cookie);self.assertIn('HttpOnly',cookie)
             request=Request(self.origin+'/api/login',data=b'{}',headers={'Host':'workspace.example.invalid','Cookie':cookie.split(';')[0],'Origin':'http://workspace.example.invalid','Content-Type':'application/json','X-Requested-With':'FoundryUI'})
             with self.assertRaises(HTTPError) as error:urlopen(request)
             self.assertEqual(error.exception.code,403)

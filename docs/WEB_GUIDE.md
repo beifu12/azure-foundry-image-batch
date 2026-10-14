@@ -2,8 +2,8 @@
 
 ## 登录与操作
 
-1. 打开部署者提供的 HTTPS 工作台网址，填写客户的 Azure 目录（租户）ID。
-2. 点击“登录 Azure”。网页显示 Microsoft 登录地址和设备代码，客户本人在 Microsoft 页面登录并完成 MFA。工作台不收集密码、验证码。设备代码登录使用 Azure SDK 内置的 Microsoft Azure CLI 公共客户端，**容器内无需安装 CLI**。登录页可能显示“Microsoft Azure CLI”，这是身份客户端名称。
+1. 打开部署者提供的 HTTPS 工作台网址。客户的 Azure 目录（租户）ID 可留空；跨租户来宾需要操作特定客户租户时，填写该客户租户 ID。
+2. 点击“登录 Azure”，直接跳转到 Microsoft 选择 CSP／客户账号，按组织政策完成授权和 MFA，再自动返回工作台。首次使用可能需要客户管理员同意 Azure Service Management 委托访问；这只允许工具代表当前账号访问 Azure，不会提升该账号的订阅权限。密码、验证码仅在 Microsoft 页面输入，**无需安装 Azure CLI**。
 3. 返回工作台，自动读取当前账号可访问的启用订阅，默认全选。可在下拉框搜索、勾选并应用，不会触发整页刷新。
 4. 勾选需要部署的模型，选择部署类型和配额范围，填写资源组、Foundry、Project 命名规则。版本默认从 Azure 的 `isDefaultVersion` 标记解析，按订阅和区域分别确认；无法确认时该项不会创建，可在高级设置指定版本。
 5. 点击“检查部署配置”，查看名称、区域、版本、最大可分配容量、已有部署以及阻塞原因。默认 `quota_scope=unknown` 只检查；必须按该客户实际配额确认是区域独立、订阅共享还是数据区共享后，重新检查才能创建。
@@ -59,11 +59,15 @@ ssh -L 8767:127.0.0.1:8767 用户名@Ubuntu地址
 
 需要 HTTPS 外部入口，目标端口 8767，至少 1 vCPU / 2 GiB，**minReplicas=1、maxReplicas=1**，revisionMode=Single。此版使用进程内会话和创建互斥，不支持多个副本/多个进程；也不能由其他实例并发写入同一客户租户。
 
-为该容器设置 `PUBLIC_ORIGIN=https://该容器的实际域名`，精确包含域名、不得带尾斜杠或子路径。生产 Cookie 为 Secure、HttpOnly、SameSite=Strict；API 拒绝跨源写入。换自定义域名时同步修改此变量。未正确配置时页面拒绝非 localhost Host，这是保护行为。
+为该容器设置 `PUBLIC_ORIGIN=https://该容器的实际域名`，精确包含域名、不得带尾斜杠或子路径。生产 Cookie 为 Secure、HttpOnly、SameSite=Lax，允许 Microsoft 顶层 GET 授权回调；API 拒绝跨源写入。换自定义域名时同步修改此变量和应用回调地址。未正确配置时页面拒绝非 localhost Host，这是保护行为。
 
-镜像拉取使用专用托管身份及 ACR 的 AcrPull；容器运行身份不自动获得客户订阅权限，实际 Azure 操作使用客户手动登录的身份。无需配置客户密码、应用 Secret 或 Storage Key。不要把登录响应/密钥写到访问日志或监控采集内容中。
+镜像拉取使用专用托管身份及 ACR 的 AcrPull；容器运行身份不自动获得客户订阅权限，实际 Azure 操作使用客户手动登录的身份。无需配置客户密码或 Storage Key。不要把登录响应/密钥写到访问日志或监控采集内容中。
 
-组织条件访问如果禁止设备代码流，登录将失败，需要客户管理员确认组织政策；工具不降低安全策略。此版不实现授权码回调登录；若组织只允许该方式，应为部署者自己的多租户应用配置正式 OAuth 登录后再使用，不复制其他工具的客户端 Secret。
+部署者在 Microsoft Entra 注册独立的多租户 Web 应用：支持“任何组织目录中的帐户”，Web 重定向 URI 为 `https://该容器的实际域名/auth/callback`，使用授权码流，不启用隐式授权。API 权限仅需 Azure Service Management 的委托权限 `user_impersonation`。创建该应用的客户端凭据，容器设置 `OAUTH_CLIENT_ID`；`OAUTH_CLIENT_SECRET` 从 Container App Secret 引用，不能写入镜像、示例配置、公开仓库或日志。凭据到期前由部署者轮换。不复用原运营工具的应用密钥。
+
+该登录应用只用于身份授权，不需要作为服务主体绑定客户所有订阅。客户登录账号仍需目标订阅 Contributor 或等效资源操作权限；目录全局管理员角色不等于订阅权限。客户租户禁止用户同意时，由管理员批准委托访问后再登录，工具不会绕过组织策略。
+
+可选的本地 Compose 未配置 OAuth 应用时，仍使用 Microsoft 设备代码登录，必须填写租户 ID；登录页可能显示 Microsoft Azure CLI，这是 SDK 默认公共客户端名称，容器内无需安装 CLI。组织禁用设备代码流时请部署正式浏览器授权方式。
 
 ## 部署者验收
 
@@ -74,4 +78,4 @@ python -X utf8 web_test.py
 
 测试使用合成租户/订阅和模拟 ARM，不访问真实 Azure，也不证明客户真实写权限。部署后分别验证健康页、真实 Microsoft 登录、模型目录读取、一个获准试点创建、Project 状态及客户 Excel 下载。没有客户对试点创建的授权时只做只读验收。
 
-官方依据：[设备代码认证](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.devicecodecredential)、[Foundry/Project 创建](https://learn.microsoft.com/en-us/azure/foundry/how-to/create-projects)、[模型目录和默认版本](https://learn.microsoft.com/en-us/rest/api/microsoftfoundry/accountmanagement/models/list?view=rest-microsoftfoundry-accountmanagement-2025-06-01)。
+官方依据：[应用注册](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)、[MSAL 授权码登录](https://learn.microsoft.com/en-us/entra/msal/python/getting-started/acquiring-tokens)、[设备代码认证](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.devicecodecredential)、[Foundry/Project 创建](https://learn.microsoft.com/en-us/azure/foundry/how-to/create-projects)、[模型目录和默认版本](https://learn.microsoft.com/en-us/rest/api/microsoftfoundry/accountmanagement/models/list?view=rest-microsoftfoundry-accountmanagement-2025-06-01)。

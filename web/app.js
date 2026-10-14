@@ -4,7 +4,7 @@ const escapeHTML=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<
 const imageModels=['gpt-image-2.5-flare','gpt-image-2.5-sunburst','gpt-image-2'];
 const textModels=['gpt-5.6-terra','gpt-5.6-luna','gpt-5.6-sol','gpt-6-sol','gpt-6-luna','gpt-6-astra','gpt-6.1-sol'];
 const regionNames={eastus2:'East US 2',westus3:'West US 3',polandcentral:'Poland Central',swedencentral:'Sweden Central',uaenorth:'UAE North'};
-let state={},selected=new Set(),draft=new Set(),subscriptionSignature='',reviewSignature='',resultSignature='',catalogSignature='',settingsChanged=false,settingsRevision=0,scanRevision=-1;
+let state={},selected=new Set(),draft=new Set(),subscriptionSignature='',reviewSignature='',resultSignature='',catalogSignature='',settingsChanged=false,settingsRevision=0,scanRevision=-1,redirectedLogin='';
 const versionInputs=new Map();
 for(const name of [...imageModels,...textModels]){
  const label=document.createElement('label');label.className='model-choice';
@@ -60,7 +60,10 @@ $('read-keys').onclick=async()=>{if(await confirmAction('读取账户 Key','只�
 $('export').onclick=async()=>{let include=false;if((state.results||[]).some(r=>r['密钥']==='••••••••'))include=await confirmAction('导出是否包含密钥','点击“确认”导出含明文密钥的 Excel；点击“取消”导出不含密钥的资源清单。请妥善保管含密钥的文件。');
  try{const response=await api('export',{include_keys:include,confirmed:include});const blob=await response.blob(),url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='foundry-resources.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);toast('已开始下载');}catch(e){error(e.message);}};
 function render(next){state=next;const busy=['running','cancelling'].includes(next.job?.status);
+ if(next.login_error)error(next.login_error);
+ if(next.login_url&&next.login_url!==redirectedLogin){try{const destination=new URL(next.login_url);if(destination.protocol==='https:'&&destination.hostname==='login.microsoftonline.com'){redirectedLogin=next.login_url;window.location.assign(next.login_url);}}catch{error('Microsoft 登录地址无效，请重新连接。');}}
  $('connection-label').textContent=next.connected?'已连接客户 Azure':'尚未连接 Azure';$('connection-dot').classList.toggle('connected',!!next.connected);$('tenant-label').textContent=next.tenant_id||'登录后显示客户租户';$('logout').hidden=!next.connected;$('login-panel').hidden=!!next.connected;
+ $('tenant').placeholder=next.login_mode==='browser'?'可留空：登录后自动识别客户租户':'请输入客户 Azure 租户 UUID';
  $('login').disabled=busy;for(const id of ['scan','catalog'])$(id).disabled=busy||!next.connected;
  const signature=JSON.stringify(next.subscriptions||[]);if(signature!==subscriptionSignature){subscriptionSignature=signature;selected=new Set((next.subscriptions||[]).map(s=>s.subscriptionId));closePicker();}
  $('subscription-count').textContent=next.connected?`已选择 ${selected.size} 项`:'尚未连接';

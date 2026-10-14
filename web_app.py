@@ -13,7 +13,7 @@ import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit,parse_qs
 from uuid import UUID
 
 import image_batch as batch
@@ -25,6 +25,7 @@ ACTIVE={'running','cancelling'}
 PUBLIC_ORIGIN=os.environ.get('PUBLIC_ORIGIN','').rstrip('/')
 WRITE_LOCK=threading.Lock()
 LOGIN_SLOTS=threading.BoundedSemaphore(8)
+ARM_SCOPES=['https://management.azure.com/user_impersonation']
 
 
 class Cancelled(Exception):pass
@@ -36,11 +37,13 @@ class Session:
         self.tenant='';self.api=None;self.credential=None;self.subscriptions=[]
         self.job={};self.challenge=None;self.plans=[];self.plan_id='';self.results=[];self.keys={};self.catalog={};self.issues=[]
         self.touched=time.monotonic()
+        self.oauth=None;self.login_url='';self.login_generation=0;self.login_error=''
 
     def snapshot(self):
         with self.lock:
             return copy.deepcopy({'connected':self.api is not None,'tenant_id':self.tenant,'subscriptions':self.subscriptions,
                 'job':self.job,'challenge':self.challenge,'plans':self.plans,'plan_id':self.plan_id,
+                'login_url':self.login_url,'login_error':self.login_error,'login_mode':'browser' if os.environ.get('OAUTH_CLIENT_ID') else 'device',
                 'results':[{**r,'密钥':'••••••••' if self.keys.get(r.get('_account_id')) else '未读取'} for r in self.results],
                 'catalog':self.catalog,'issues':self.issues,'models':batch.MODELS})
 
@@ -97,7 +100,84 @@ def start(session,title,operation):
         session.thread=threading.Thread(target=run,daemon=True);session.thread.start()
 
 
+def oauth_client(tenant):
+    import msal
+    client_id=os.environ.get('OAUTH_CLIENT_ID');secret=os.environ.get('OAUTH_CLIENT_SECRET')
+    if not client_id or not secret:raise ValueError('服务端 Microsoft 浏览器登录尚未配置。')
+    return msal.ConfidentialClientApplication(str(UUID(client_id)),client_credential=secret,authority='https://login.microsoftonline.com/'+tenant,token_cache=msal.TokenCache(),timeout=30)
+
+
+def cancel_job(session):
+    with session.lock:
+        session.cancel.set();session.oauth=None;session.login_url='';session.login_generation+=1
+        if session.job.get('status') in ACTIVE:
+            progress(session,message='正在停止后续步骤，等待当前 Azure 请求返回。');session.job['status']='cancelling'
+
+
+class BrowserCredential:
+    def __init__(self,client,result):
+        from azure.core.credentials import AccessToken
+        claims=result.get('id_token_claims') or {}
+        self.tenant=str(UUID(claims.get('tid','')));user=str(UUID(claims.get('oid','')))
+        accounts=[a for a in client.get_accounts() if a.get('local_account_id')==user and a.get('realm') in (self.tenant,'organizations')]
+        if len(accounts)!=1:raise ValueError('无法唯一确认客户登录身份，请重新连接。')
+        self.client=client;self.account=accounts[0];self.lock=threading.Lock()
+        self.name=claims.get('preferred_username') or claims.get('name') or ''
+        self.token_type=AccessToken
+
+    def get_token(self,*scopes,**kwargs):
+        if scopes not in ((batch.ARM+'/.default',),tuple(ARM_SCOPES)):raise ValueError('此客户连接仅用于 Azure 管理接口。')
+        with self.lock:result=self.client.acquire_token_silent(ARM_SCOPES,account=self.account)
+        if not result or not result.get('access_token'):raise ValueError('客户登录已过期或需要补充授权，请重新连接。')
+        return self.token_type(result['access_token'],int(result.get('expires_on',time.time()+int(result.get('expires_in',300)))))
+
+
 def start_login(session,data):
+    if not os.environ.get('OAUTH_CLIENT_ID'):return start_device_login(session,data)
+    tenant=str(UUID(data['tenant_id'])) if data.get('tenant_id') else 'organizations'
+    if session.api is not None:raise ValueError('请先退出当前客户连接。')
+    with session.lock:
+        if session.job.get('status') in ACTIVE:raise ValueError('当前连接步骤仍在执行，请稍后重试。')
+        session.login_generation+=1;generation=session.login_generation;session.login_error=''
+    def begin(event):
+        if not LOGIN_SLOTS.acquire(blocking=False):raise ValueError('当前登录请求较多，请稍后重试。')
+        try:
+            client=oauth_client(tenant)
+            flow=client.initiate_auth_code_flow(ARM_SCOPES,redirect_uri=(PUBLIC_ORIGIN or 'http://127.0.0.1:8767')+'/auth/callback',prompt='select_account',response_mode='query')
+        finally:LOGIN_SLOTS.release()
+        if not flow.get('state') or urlsplit(flow.get('auth_uri','')).hostname!='login.microsoftonline.com':raise ValueError('无法开始 Microsoft 浏览器登录。')
+        with session.lock:
+            if event.is_set() or session.login_generation!=generation:raise Cancelled()
+            session.oauth={'client':client,'flow':flow,'expires':time.monotonic()+900,'expected_tenant':None if tenant=='organizations' else tenant,'generation':generation}
+            session.login_url=flow['auth_uri']
+    start(session,'跳转 Microsoft 选择 CSP / 客户账号',begin)
+
+
+def finish_browser_login(session,response):
+    with session.lock:
+        pending=session.oauth
+        if not pending or pending['expires']<time.monotonic() or not response.get('state') or not secrets.compare_digest(str(pending['flow']['state']),response['state']):raise ValueError('授权已过期、已使用或不属于当前浏览器，请重新登录。')
+        session.oauth=None;session.login_url=''
+    # Redeem once; neither the authorization code nor SDK error text reaches the UI.
+    try:result=pending['client'].acquire_token_by_auth_code_flow(pending['flow'],response)
+    except Exception:raise ValueError('Microsoft 客户授权未完成，请重新连接。') from None
+    if not result.get('access_token'):raise ValueError('Microsoft 客户授权未完成；请按 Microsoft 提示授予 Azure 委托访问权限。')
+    try:credential=BrowserCredential(pending['client'],result)
+    except Exception:raise ValueError('无法确认客户登录身份，请重新连接。') from None
+    if pending.get('expected_tenant') and credential.tenant!=pending['expected_tenant']:raise ValueError('登录账号与指定的客户租户不一致。')
+    def connect(event):
+        api=JobAzure(credential,event,lambda message:progress(session,message=message))
+        subs=batch.subscriptions(api,{'tenant_id':credential.tenant,'subscription_ids':'all'})
+        with session.lock:
+            if event.is_set() or session.login_generation!=pending.get('generation',0):raise Cancelled()
+            session.api=batch.Azure(credential);session.credential=credential;session.tenant=credential.tenant
+            session.subscriptions=sorted(subs,key=lambda r:[int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)',r.get('displayName',''))])
+    with session.lock:
+        if session.login_generation!=pending.get('generation',0):raise ValueError('当前客户登录已退出或被新连接替换。')
+        start(session,'连接客户账号并读取可访问订阅',connect)
+
+
+def start_device_login(session,data):
     tenant=str(UUID(data.get('tenant_id','')))
     def login(event):
         if not LOGIN_SLOTS.acquire(blocking=False):raise ValueError('当前登录请求较多，请稍后重试。')
@@ -106,7 +186,7 @@ def start_login(session,data):
     def login_locked(event):
         from azure.identity import DeviceCodeCredential
         def prompt(uri,code,expires):
-            if urlsplit(uri).hostname not in ('microsoft.com','www.microsoft.com','login.microsoftonline.com'):raise ValueError('Microsoft 登录地址不符合预期。')
+            if urlsplit(uri).hostname not in ('microsoft.com','www.microsoft.com','login.microsoft.com','login.microsoftonline.com'):raise ValueError('Microsoft 登录地址不符合预期。')
             with session.lock:session.challenge={'url':uri,'code':code}
             progress(session,message='在 Microsoft 页面完成登录；本工具不收集密码和验证码。')
         credential=DeviceCodeCredential(tenant_id=tenant,prompt_callback=prompt,timeout=300,authority='https://login.microsoftonline.com')
@@ -401,6 +481,9 @@ class Handler(BaseHTTPRequestHandler):
         cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''))
         sid=cookie.get('foundry_session');sid=sid.value if sid else ''
         with self.server.sessions_lock:
+            for value in self.server.sessions.values():
+                with value.lock:
+                    if value.oauth and value.oauth['expires']<time.monotonic():value.oauth=None;value.login_url=''
             expired=[key for key,value in self.server.sessions.items() if time.monotonic()-value.touched>14400]
             for key in expired:self.server.sessions.pop(key).cancel.set()
             session=self.server.sessions.get(sid)
@@ -427,11 +510,21 @@ class Handler(BaseHTTPRequestHandler):
                         for key in unused[:128]:self.server.sessions.pop(key).cancel.set()
                     if len(self.server.sessions)>=256:return self.reply(503,{'error':'当前活动会话已满，请稍后重试。'})
                     self.server.sessions[sid]=session
-                cookie='foundry_session='+sid+'; Path=/; HttpOnly; SameSite=Strict'+('; Secure' if PUBLIC_ORIGIN else '')
+                cookie='foundry_session='+sid+'; Path=/; HttpOnly; SameSite=Lax'+('; Secure' if PUBLIC_ORIGIN else '')
             return self.reply(200,(ROOT/'web/index.html').read_bytes(),'text/html; charset=utf-8',cookie)
         files={'/app.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}
         if path in files:return self.reply(200,(ROOT/'web'/path[1:]).read_bytes(),files[path])
         session=self.session()
+        if path=='/auth/callback' and session:
+            try:
+                query=parse_qs(urlsplit(self.path).query)
+                if any(len(values)!=1 for values in query.values()):raise ValueError('授权响应格式无效。')
+                finish_browser_login(session,{key:values[0] for key,values in query.items()})
+            except ValueError as error:
+                with session.lock:session.login_error=str(error)
+            except Exception:
+                with session.lock:session.login_error='授权回调未完成，请重新登录。'
+            self.send_response(303);self.send_header('Location','/');self.send_header('Cache-Control','no-store');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Length','0');self.end_headers();return
         if path=='/api/state' and session:return self.reply(200,session.snapshot())
         return self.reply(404,{'error':'页面或接口不存在。'})
 
@@ -452,11 +545,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path=='/api/deploy':start_deploy(session,data)
             elif path=='/api/keys':read_keys(session)
             elif path=='/api/cancel':
-                session.cancel.set()
-                if session.job.get('status') in ACTIVE:progress(session,message='正在停止后续步骤，等待当前 Azure 请求返回。');session.job['status']='cancelling'
+                cancel_job(session)
             elif path=='/api/logout':
                 session.cancel.set()
-                with session.lock:session.api=None;session.credential=None;session.subscriptions=[];session.plans=[];session.plan_id='';session.results=[];session.keys={};session.challenge=None;session.catalog={};session.issues=[]
+                with session.lock:session.api=None;session.credential=None;session.subscriptions=[];session.plans=[];session.plan_id='';session.results=[];session.keys={};session.challenge=None;session.catalog={};session.issues=[];session.oauth=None;session.login_url='';session.login_generation+=1
             elif path=='/api/reveal':
                 key=session.keys.get(data.get('account_id'))
                 if not key:raise ValueError('此资源尚未读取密钥；先点击读取 Key。')
@@ -468,7 +560,11 @@ class Handler(BaseHTTPRequestHandler):
                 rows=[{**r,'密钥':session.keys.get(r['_account_id'],'未读取') if include else ''} for r in session.results]
                 return self.reply(200,excel(rows,session.results),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',download=True)
             else:return self.reply(404,{'error':'接口不存在。'})
-            return self.reply(202,{'ok':True})
+            cookie=None
+            if path=='/api/login' and os.environ.get('OAUTH_CLIENT_ID'):
+                values=SimpleCookie();values.load(self.headers.get('Cookie',''))
+                cookie='foundry_session='+values['foundry_session'].value+'; Path=/; HttpOnly; SameSite=Lax'+('; Secure' if PUBLIC_ORIGIN else '')
+            return self.reply(202,{'ok':True},cookie=cookie)
         except (ValueError,KeyError,TypeError):return self.reply(400,{'error':'输入或状态无效，请检查选择、版本及命名规则后重试。'})
         except Exception:return self.reply(500,{'error':'请求未完成，请重新检查；不要反复提交创建。'})
 
