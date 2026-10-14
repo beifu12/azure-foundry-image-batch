@@ -17,8 +17,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.2/azure-foundry-image-batch.zip -o image-batch-v1.2.2.zip
-unzip image-batch-v1.2.2.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.3/azure-foundry-image-batch.zip -o image-batch-v1.2.3.zip
+unzip image-batch-v1.2.3.zip
 cd azure-foundry-image-batch
 ```
 
