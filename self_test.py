@@ -255,6 +255,32 @@ class AllocationTests(unittest.TestCase):
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_single_subscription_string_is_configuration_error_before_login(self):
+        from unittest.mock import patch
+        config=configuration();config['subscription_ids']=SID
+        with patch.object(batch,'credential') as auth:
+            report=batch.environment_report('app',config,online=True)
+        failures=[c for c in report['checks'] if c['status']=='failed']
+        self.assertEqual(failures[0]['name'],'客户配置')
+        self.assertIn('subscription_ids',failures[0]['detail'])
+        self.assertIn('[',failures[0]['detail'])
+        auth.assert_not_called()
+
+    def test_invalid_subscription_list_is_rejected_before_login(self):
+        from unittest.mock import patch
+        for selected in ([], ['not-a-uuid'], [None], 123):
+            config=configuration();config['subscription_ids']=selected
+            with patch.object(batch,'credential') as auth:
+                report=batch.environment_report('app',config,online=True)
+            self.assertTrue(any(c['name']=='客户配置' and c['status']=='failed' for c in report['checks']))
+            self.assertIn('subscription_ids',str(report))
+            auth.assert_not_called()
+
+    def test_subscription_configuration_accepts_all_or_id_list(self):
+        for selected in ('all', [SID]):
+            config=configuration();config['subscription_ids']=selected
+            batch.check_config(config)
+
     def test_admin_mode_reports_missing_cli_without_attempting_login(self):
         from unittest.mock import patch
         with patch('shutil.which',return_value=None),patch.object(batch,'credential') as auth:

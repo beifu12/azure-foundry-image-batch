@@ -23,6 +23,7 @@
 | `No module named azure` / `requests` | 使用同一个虚拟环境的 Python 执行 `-m pip install -r requirements.txt`，不要把包安装到另一个 Python |
 | `az` 不存在 | 管理员方式按官方说明安装 Azure CLI 后重新打开终端；应用方式不需要它；pip 不会安装 Azure CLI |
 | 网页已登录，但脚本未登录 | 在脚本所在的相同电脑/终端/WSL/容器环境完成 CLI 登录；不要复制 Azure 登录缓存或 Token |
+| CLI 已登录，但旧版 doctor 仍说登录无效 | 先核对 `tenant_id` 与 `az account show` 的租户一致；`subscription_ids` 只能是 `"all"` 或列表，单个订阅也必须写成 `["订阅ID"]`。v1.0.2 起会在登录检查前报告此类配置错误 |
 | CLI 选择了其他云 | 只有明确使用 Azure 公有云才运行 `az cloud set --name AzureCloud`，然后登录客户资源租户；脚本不支持世纪互联云 |
 | MFA 或条件访问提示 | 客户本人完成；无浏览器时可按组织策略使用 `az login --tenant ... --use-device-code`，不以用户名/密码自动登录 |
 | 应用没有可见订阅 | 核对应用租户及目标订阅 RBAC；目录内创建了应用不等于已经授权订阅。新角色可能延迟生效 |

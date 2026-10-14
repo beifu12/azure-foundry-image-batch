@@ -236,6 +236,16 @@ def subscriptions(api, config):
 
 def check_config(config):
     str(UUID(config['tenant_id']))
+    selected=config.get('subscription_ids','all')
+    if selected != 'all':
+        if not isinstance(selected,list) or not selected:
+            raise ValueError('subscription_ids 必须是 "all" 或非空列表；单个订阅也要写成 ["订阅ID"]，不能直接填写字符串。')
+        try:
+            for sid in selected:
+                if not isinstance(sid,str): raise ValueError()
+                str(UUID(sid))
+        except ValueError:
+            raise ValueError('subscription_ids 列表中每一项都必须是有效的订阅 UUID 字符串。') from None
     if config.get('model') not in MODELS: raise ValueError('请选择 gpt-image-2、gpt-image-2.5-flare 或 gpt-image-2.5-sunburst。')
     if config.get('sku') not in ('GlobalStandard','DataZoneStandard'): raise ValueError('仅支持 GlobalStandard / DataZoneStandard。')
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,40}',config.get('model_version','')): raise ValueError('须明确填写模型版本，不自动选取或升级版本。')
@@ -434,7 +444,9 @@ def environment_report(mode, config=None, credential_file=None, online=False):
     if not config:
         record('客户配置','failed','未找到配置；先复制 config.example.json 为 config.json，填写客户租户与命名规则。');return report
     try:check_config(config)
-    except (ValueError,KeyError):
+    except ValueError as error:
+        record('客户配置','failed',str(error));return report
+    except KeyError:
         record('客户配置','failed','配置缺失或无效。请填写客户租户 ID、精确模型版本、部署类型与命名规则。');return report
     try:
         api=Azure(credential(config,mode,credential_file))

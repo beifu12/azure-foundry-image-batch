@@ -7,8 +7,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.0.1/azure-foundry-image-batch.zip -o image-batch-v1.0.1.zip
-unzip image-batch-v1.0.1.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.0.2/azure-foundry-image-batch.zip -o image-batch-v1.0.2.zip
+unzip image-batch-v1.0.2.zip
 cd azure-foundry-image-batch
 ```
 
@@ -78,6 +78,8 @@ Linux/macOS/Cloud Shell 的创建环境命令同样是 `python -m venv .venv`，
 
 1. 把 `tenant_id` 替换为客户的目录（租户）ID。
 2. 默认 `subscription_ids: "all"`。试运行建议改为 `["客户测试订阅ID"]`。
+
+   单个订阅也必须使用列表，例如 `"subscription_ids": ["11111111-1111-4111-8111-111111111111"]`，不能直接填写订阅 ID 字符串。示例 UUID 需要替换为客户的真实订阅 ID。
 3. 选择模型、版本和部署类型；不是只有一个笼统的 image-2.5。
 4. 确认资源组、账户及部署命名规则。
 5. 先使用 `quota_scope: "unknown"` 扫描，核对实际配额范围后修改并重扫。
