@@ -17,8 +17,8 @@
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.0/azure-foundry-image-batch.zip -o image-batch-v1.2.0.zip
-unzip image-batch-v1.2.0.zip
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.1/azure-foundry-image-batch.zip -o image-batch-v1.2.1.zip
+unzip image-batch-v1.2.1.zip
 cd azure-foundry-image-batch
 ```
 
@@ -51,8 +51,9 @@ cd azure-foundry-image-batch
 
 | 值 | 含义 |
 | --- | --- |
-| `unknown` | 默认：仅扫描，全部新部署阻塞，不猜测配额范围 |
-| `regional` | 客户已确认此模型/类型仍是每区域独立配额，各区用满可分配额度 |
+| `auto` | 默认：逐区域检查目标，执行每项前重新核对余额；不推断共享范围或保证区域总和 |
+| `unknown` | 仅扫描，全部新部署阻塞；不安排创建 |
+| `regional` | 客户已确认每区域独立配额，各区在 Tier 1 目标和实际余额内分配 |
 | `subscription` | GlobalStandard 跨区域共享，同一订阅的总分配不超过保守剩余额度 |
 | `data-zone` | DataZoneStandard 按数据区共享，同时需填写 `data_zones` 区域映射 |
 
@@ -92,7 +93,7 @@ Linux/macOS/Cloud Shell 的创建环境命令同样是 `python -m venv .venv`，
    单个订阅也必须使用列表，例如 `"subscription_ids": ["11111111-1111-4111-8111-111111111111"]`，不能直接填写订阅 ID 字符串。示例 UUID 需要替换为客户的真实订阅 ID。
 3. 选择模型、版本和部署类型；不是只有一个笼统的 image-2.5。
 4. 确认资源组、账户及部署命名规则。
-5. 先使用 `quota_scope: "unknown"` 扫描，核对实际配额范围后修改并重扫。
+5. 默认使用 `quota_scope: "auto"`，逐项核对实际额度。需要纯只读清单时可选 `unknown`；有明确共享池信息时可选对应高级模式。
 
 模型示例：
 

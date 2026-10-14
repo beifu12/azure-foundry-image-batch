@@ -47,6 +47,34 @@ class FakeAzure:
 
 
 class ScanTests(unittest.TestCase):
+    def test_auto_quota_check_plans_without_manual_scope_confirmation(self):
+        config=configuration();config['quota_scope']='auto'
+        rows=batch.scan(FakeAzure(),config)['rows']
+        self.assertEqual([r['status'] for r in rows],['planned','planned'])
+        self.assertEqual([r['capacity'] for r in rows],[2,2])
+
+    def test_shared_quota_consumed_by_first_region_stops_next_resource_writes(self):
+        class SharedBalance(FakeAzure):
+            def put(self,path,body,version=None):
+                result=super().put(path,body,version)
+                if '/deployments/' in path:self.remaining=0
+                return result
+        api=SharedBalance();config=configuration();config['quota_scope']='auto'
+        plan=batch.scan(api,config);report=batch.execute(api,plan)
+        self.assertEqual([r['status'] for r in report['rows']],['created','failed'])
+        self.assertFalse(any('westus3' in p for method,p in api.calls if method=='PUT'))
+
+    def test_quota_change_during_account_creation_stops_deployment_submission(self):
+        class ChangedDuringAccount(FakeAzure):
+            def put(self,path,body,version=None):
+                result=super().put(path,body,version)
+                if '/accounts/' in path and '/deployments/' not in path:self.remaining=0
+                return result
+        api=ChangedDuringAccount();config=configuration();config['regions']=['eastus2']
+        report=batch.execute(api,batch.scan(api,config))
+        self.assertEqual(report['rows'][0]['status'],'failed')
+        self.assertFalse(any('/deployments/' in p for method,p in api.calls if method=='PUT'))
+
     def test_tier1_image_target_caps_capacity_at_two_rpm(self):
         class LargeQuota(FakeAzure):
             def all(self,path,params=None):

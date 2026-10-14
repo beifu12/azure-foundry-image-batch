@@ -5,7 +5,7 @@
   "model_version": "2026-04-21",
   "sku": "GlobalStandard",
   "regions": "auto",
-  "quota_scope": "unknown",
+  "quota_scope": "auto",
   "data_zones": {},
   "resource_group_template": "rg-image-{sub8}-{region}",
   "account_template": "ai-image-{sub8}-{region}",

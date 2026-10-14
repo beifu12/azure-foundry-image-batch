@@ -221,7 +221,7 @@ def configurations(session,data):
         approved=list(dict.fromkeys(r for r in regions if r in REGIONS)) if model['name']=='gpt-image-2' else ('auto' if data.get('auto_regions') is True else list(dict.fromkeys(others)))
         if not approved:raise ValueError('请为所选模型指定至少一个部署区域。')
         version=model.get('version','').strip()
-        config=dict(tenant_id=session.tenant,subscription_ids=selected,model=model['name'],model_version=version or 'AzureDefault',use_default=not version,sku=data.get('sku','GlobalStandard'),regions=approved,quota_scope=data.get('quota_scope','unknown'),data_zones=data.get('data_zones',{}),resource_group_template=data.get('resource_group_template',''),account_template=data.get('account_template',''),deployment_name=model['name'])
+        config=dict(tenant_id=session.tenant,subscription_ids=selected,model=model['name'],model_version=version or 'AzureDefault',use_default=not version,sku=data.get('sku','GlobalStandard'),regions=approved,quota_scope=data.get('quota_scope','auto'),data_zones=data.get('data_zones',{}),resource_group_template=data.get('resource_group_template',''),account_template=data.get('account_template',''),deployment_name=model['name'])
         batch.check_config(config)
         result.append(config)
     project=data.get('project_template','')

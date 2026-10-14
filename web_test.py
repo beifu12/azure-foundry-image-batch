@@ -48,6 +48,11 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_default_quota_mode_does_not_require_manual_scope_confirmation(self):
+        session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-04-21'}],'regions':['eastus2'],'resource_group_template':'rg-{sub8}','account_template':'ai-{sub8}-{region}','project_template':'{foundry}-project'}
+        configs,_=web.configurations(session,data);self.assertEqual(configs[0]['quota_scope'],'auto')
+
     def test_manual_other_regions_are_separate_from_image2_candidates(self):
         session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
         data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-04-21'},{'name':'gpt-6-sol','version':'2026-01-01'}],'regions':list(web.REGIONS),'other_regions':['eastus2'],'auto_regions':False,'resource_group_template':'rg-{sub8}','account_template':'ai-{sub8}-{region}','project_template':'{foundry}-project'}

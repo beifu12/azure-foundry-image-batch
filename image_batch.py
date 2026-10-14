@@ -160,7 +160,9 @@ def same_model(deployment, name, sku):
 
 
 def quota_pool(scope, region, zones):
-    if scope == 'regional': return region
+    # Auto plans each location; writes re-read live quota, without assuming a
+    # combined regional total is guaranteed or inferring the provider's scope.
+    if scope in ('regional','auto'): return region
     if scope == 'subscription': return 'subscription'
     if scope == 'data-zone' and zones.get(region): return 'zone:' + zones[region]
     raise ValueError('必须确认真实配额范围；data-zone 还需配置每个区域所属的数据区。')
@@ -264,7 +266,7 @@ def check_config(config):
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,40}',config.get('model_version','')): raise ValueError('须明确填写模型版本，不自动选取或升级版本。')
     for key in ('resource_group_template','account_template','deployment_name'):
         if not config.get(key): raise ValueError('须由客户确认并填写命名规则。')
-    if config.get('quota_scope','unknown') not in ('unknown','regional','subscription','data-zone'): raise ValueError('quota_scope 无效。')
+    if config.get('quota_scope','unknown') not in ('unknown','auto','regional','subscription','data-zone'): raise ValueError('quota_scope 无效。')
     if config.get('quota_scope') == 'subscription' and config['sku'] != 'GlobalStandard': raise ValueError('订阅全局共享池仅适用于 GlobalStandard。')
     if config.get('quota_scope') == 'data-zone' and config['sku'] != 'DataZoneStandard': raise ValueError('数据区共享池仅适用于 DataZoneStandard。')
 
@@ -355,7 +357,7 @@ def scan(api, config, on_progress=None):
                     if candidates: desired=candidates[0]['id'];group=desired.split('/')[4]
                     row.update(account_id=desired,resource_group=group,new_account=not candidates,deployment=render_name(config['deployment_name'],sid,region,'deployment',sub.get('displayName',''),region_index))
                     if config.get('quota_scope','unknown') == 'unknown':
-                        row.update(status='blocked',message='已扫描最大容量，但配额是否跨区域共享尚未确认。请确认 quota_scope 后重扫。')
+                        row.update(status='blocked',message='当前是只读检查模式；切换为自动核对后可生成 Tier 1 创建清单。')
                         continue
                     row['pool'] = row['usage_name']+':'+quota_pool(config['quota_scope'],region,config.get('data_zones',{}))
                     row['status']='planned';pending.append(row)
@@ -409,6 +411,8 @@ def execute(api, confirmed, on_progress=None):
             if row['status'] != 'planned': continue
             aid=row['account_id'];did=aid+'/deployments/'+row['deployment']
             if api.optional(did) is not None: raise ValueError('目标部署名称已经占用；不覆盖已有部署。请重新扫描。')
+            remaining=model_metadata(api,row['subscription_id'],row['region'],{**fresh['config'],'model_version':row['version']})
+            if row['capacity']>remaining['maximum']:raise ValueError('当前余额低于清单目标；此项未创建资源，请重新检查。')
             if row['new_account']:
                 if api.optional(aid) is not None: raise ValueError('目标账户已经存在；不覆盖，须重新扫描。')
                 group='/subscriptions/'+row['subscription_id']+'/resourceGroups/'+row['resource_group']
