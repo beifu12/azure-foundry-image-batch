@@ -6,6 +6,7 @@ config.json
 *.tmp
 *.json
 !config.example.json
+!config.text.example.json
 .env
 .env.*
 .azure/

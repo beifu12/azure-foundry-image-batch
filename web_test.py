@@ -49,6 +49,290 @@ def copy_dict(value):return json.loads(json.dumps(value))
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_prefetch_reuses_each_workers_http_connection_and_closes_it(self):
+        session=web.Session();session.credential=Mock();transports=[]
+        def transport():
+            value=Mock();value.trust_env=False;transports.append(value);return value
+        def response(*args,**kwargs):time.sleep(.005);return {'value':[]}
+        with patch('requests.Session',side_effect=transport),patch.object(batch.Azure,'call',response):
+            api=web.job_api(session,threading.Event(),snapshot=True)
+            web.prefetch_reads(api,[(f'/catalog/{i}',None) for i in range(20)])
+        self.assertLessEqual(len(transports),5)
+        for value in transports[1:]:value.close.assert_called_once()
+
+    def test_prefetch_global_limit_applies_across_subscription_workers(self):
+        from concurrent.futures import ThreadPoolExecutor
+        active=0;maximum=0;lock=threading.Lock()
+        def response(api,method,path,*args,**kwargs):
+            nonlocal active,maximum
+            with lock:active+=1;maximum=max(maximum,active)
+            try:time.sleep(.025);return {'value':[]}
+            finally:
+                with lock:active-=1
+        session=web.Session();session.credential=Mock();event=threading.Event()
+        with patch.object(batch.Azure,'call',response),ThreadPoolExecutor(max_workers=8) as pool:
+            jobs=[pool.submit(web.prefetch_reads,web.job_api(session,event,snapshot=True),[(f'/s{i}/r{j}',None) for j in range(8)]) for i in range(8)]
+            for job in jobs:job.result()
+        self.assertGreater(maximum,4);self.assertLessEqual(maximum,web.MAX_CHECK_READS)
+
+    def test_failed_second_page_cannot_be_read_as_empty_or_complete_inventory(self):
+        def response(api,method,path,*args,**kwargs):
+            if path=='/accounts':return {'value':[{'name':'known'}],'nextLink':batch.ARM+'/denied'}
+            raise batch.AzureError(403,'AuthorizationFailed')
+        session=web.Session();session.credential=Mock();api=web.job_api(session,threading.Event(),snapshot=True)
+        with patch.object(batch.Azure,'call',response):
+            web.prefetch_reads(api,[('/accounts',None)])
+            with self.assertRaises(batch.AzureError):api.all('/accounts')
+
+    def test_merged_plan_retains_each_subscriptions_default_version_for_fresh_scan(self):
+        second='22222222-2222-4222-8222-222222222222'
+        session=web.Session();session.api=True;session.tenant=TENANT
+        session.subscriptions=[{'subscriptionId':sid,'tenantId':TENANT,'state':'Enabled','displayName':f'A0{i}'} for i,sid in enumerate((SID,second),3)]
+        data={'subscription_ids':[SID,second],'models':[{'name':'gpt-image-2'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        def scope(_session,configs,template,event,notify,cache=None):
+            config=configs[0];sid=config['subscription_ids'][0];config['model_version']='v1' if sid==SID else 'v2'
+            config['subscription_versions']={sid:config['model_version']}
+            row={'subscription_id':sid,'subscription':'A03','region':'eastus2','model':config['model'],'version':config['model_version'],'status':'planned'}
+            plan={'config':config,'tenant_id':TENANT,'rows':[row],'errors':[]}
+            return [{'plan':plan,'authoritative':copy_dict(plan),'projects':{},'project_errors':[]}],[]
+        captured={}
+        def execute(api,expected,**kwargs):
+            captured[expected['config']['subscription_ids'][0]]=expected['config']['model_version']
+            return {'rows':[]}
+        with patch.object(web,'JobAzure',return_value=MemoryAzure()),patch.object(web.batch,'subscriptions',return_value=session.subscriptions),patch.object(web,'scan_scope',side_effect=scope):
+            web.start_scan(session,data);session.thread.join(3)
+        with patch.object(batch,'execute',side_effect=execute),patch.object(web,'verify_results'),patch.object(web,'collect_keys'):
+            web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True});session.thread.join(3)
+        self.assertEqual(captured,{SID:'v1',second:'v2'})
+
+    def test_model_entry_routes_web_and_legacy_cli_without_duplicating_workflow(self):
+        import foundry_models
+        with patch.object(web,'main',return_value=0) as start_web:
+            self.assertEqual(foundry_models.main(['web','--port','8767']),0)
+            start_web.assert_called_once_with(['--port','8767'])
+        with patch.object(batch,'main',return_value=0) as start_cli:
+            self.assertEqual(foundry_models.main(['doctor','--offline','--auth','app']),0)
+            start_cli.assert_called_once_with(['doctor','--offline','--auth','app'])
+
+    def test_existing_deployment_still_checks_quota_and_zero_balance_does_not_create(self):
+        api=MemoryAzure();api.put(AID,{'kind':'AIServices','location':'eastus2','properties':{}})
+        api.put(AID+'/deployments/image',{'sku':{'name':'GlobalStandard','capacity':1},'properties':{'model':{'format':'OpenAI','name':'gpt-image-2','version':'2026-01-01'}}});api.writes=[]
+        original=api.all;reads=[]
+        def quota(path,params=None):
+            reads.append(path)
+            if path.endswith('/usages'):return [{'name':{'value':name},'unit':'Count','currentValue':1,'limit':1} for name in batch.MODELS]
+            return original(path,params)
+        session=web.Session();session.api=True;session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID,'displayName':'A03'}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        configs,template=web.configurations(session,data)
+        with patch.object(web,'JobAzure',return_value=api),patch.object(api,'all',side_effect=quota):
+            bundles,_=web.scan_scope(session,configs,template,threading.Event(),lambda *a,**k:None)
+        row=bundles[0]['plan']['rows'][0]
+        self.assertEqual(row['status'],'existing');self.assertTrue(row['quota_checked']);self.assertEqual(row['quota_remaining'],0)
+        self.assertTrue(any(p.endswith('/usages') for p in reads));self.assertEqual(api.writes,[])
+
+    def test_prefetch_bounds_parallel_reads_and_reuses_complete_pages_and_failures(self):
+        from collections import Counter
+        calls=Counter();active=0;maximum=0;lock=threading.Lock()
+        def response(api,method,path,body=None,params=None,headers=None):
+            nonlocal active,maximum
+            self.assertEqual(method,'GET')
+            with lock:calls[path]+=1;active+=1;maximum=max(maximum,active)
+            try:
+                time.sleep(.01)
+                if path.endswith('/denied'):raise batch.AzureError(403,'AuthorizationFailed')
+                if path.endswith('/accounts'):return {'value':[{'name':'first'}],'nextLink':batch.ARM+'/page-two'}
+                return {'value':[{'name':'second'}]}
+            finally:
+                with lock:active-=1
+        session=web.Session();session.credential=Mock();event=threading.Event()
+        with patch.object(batch.Azure,'call',response):
+            api=web.job_api(session,event,snapshot=True)
+            paths=[('/accounts',None),('/accounts',None),('/models',None),('/usages',None),('/denied',None)]
+            web.prefetch_reads(api,paths)
+            self.assertEqual([r['name'] for r in api.all('/accounts')],['first','second'])
+            for _ in range(2):
+                with self.assertRaises(batch.AzureError):api.all('/denied')
+            self.assertTrue(all(count==1 for count in calls.values()),calls)
+            self.assertGreater(maximum,1);self.assertLessEqual(maximum,web.MAX_CHECK_READS)
+            api.all('/accounts')[0]['name']='changed'
+            self.assertEqual(api.all('/accounts')[0]['name'],'first')
+            # A new check does not inherit either stale data or permission failures.
+            fresh=web.job_api(session,event,snapshot=True)
+            self.assertEqual(len(fresh.all('/accounts')),2)
+            self.assertEqual(calls['/accounts'],2)
+
+    def test_prefetch_is_cancelled_and_never_submits_writes(self):
+        session=web.Session();session.credential=Mock();event=threading.Event();event.set()
+        api=web.job_api(session,event,snapshot=True)
+        with patch.object(batch.Azure,'call',side_effect=AssertionError('cancelled check must not request Azure')):
+            with self.assertRaises(web.Cancelled):web.prefetch_reads(api,[('/accounts',None)])
+
+    def test_azure_qualified_project_name_is_exported_and_verified_as_child_name(self):
+        api=MemoryAzure();api.put(AID,{'kind':'AIServices','location':'eastus2','properties':{}})
+        api.put(AID+'/projects/cv-a03-001-resource',{'properties':{}})
+        api.resources[AID+'/projects/cv-a03-001-resource']['name']='cv-a03-001/cv-a03-001-resource'
+        api.put(AID+'/deployments/image',{'sku':{'name':'GlobalStandard','capacity':1},'properties':{'model':{'format':'OpenAI','name':'gpt-image-2','version':'v'}}});api.writes=[]
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID,'displayName':'Azure Subscription A03'}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'v'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):
+            web.start_scan(session,data);session.thread.join(3)
+            self.assertEqual(session.plans[0]['projects'][AID]['name'],'cv-a03-001-resource')
+            web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True});session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertTrue(session.results[0]['verified']);self.assertEqual(api.writes,[])
+
+    def test_partial_existing_read_never_recreates_a_disappeared_project(self):
+        api=MemoryAzure();api.put(AID,{'kind':'AIServices','location':'eastus2','properties':{}})
+        for name in ('one','two'):api.put(AID+'/deployments/'+name,{'sku':{'name':'GlobalStandard','capacity':1},'properties':{'model':{'format':'OpenAI','name':'gpt-image-2','version':'v'}}})
+        api.writes=[];session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.plan_id='reviewed'
+        row={'subscription':'A03','subscription_id':SID,'region':'eastus2','model':'gpt-image-2','status':'existing','existing':[{'account_id':AID,'deployment':name,'sku':'GlobalStandard','capacity':1,'version':'v'} for name in ('one','two')]}
+        plan={'rows':[row],'errors':[],'config':{'subscription_ids':[SID]},'tenant_id':TENANT}
+        session.plans=[{'plan':plan,'projects':{AID:{'name':'p','new':False}}}]
+        original=api.get
+        def missing(path,version=None):
+            if path.endswith('/deployments/two') or '/projects/' in path:raise batch.AzureError(404,'ResourceNotFound')
+            return original(path,version)
+        with patch.object(web,'JobAzure',return_value=api),patch.object(api,'get',side_effect=missing):
+            web.start_deploy(session,{'plan_id':'reviewed','confirmed':True});session.thread.join(3)
+        self.assertEqual(session.job['status'],'partial',session.job);self.assertEqual(api.writes,[])
+
+    def test_existing_only_result_does_not_rescan_every_subscription_model(self):
+        api=MemoryAzure()
+        api.put(AID,{'kind':'AIServices','location':'eastus2','properties':{}})
+        api.put(AID+'/projects/p',{'properties':{}})
+        api.put(AID+'/deployments/image',{'sku':{'name':'GlobalStandard','capacity':1},'properties':{'model':{'format':'OpenAI','name':'gpt-image-2','version':'v'}}})
+        api.writes=[]
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.plan_id='reviewed'
+        row={'subscription':'A03','subscription_id':SID,'region':'eastus2','model':'gpt-image-2','status':'existing','existing':[{'account_id':AID,'deployment':'image','sku':'GlobalStandard','capacity':1,'version':'v'}]}
+        plan={'rows':[row],'errors':[],'config':{'subscription_ids':[SID]},'tenant_id':TENANT}
+        session.plans=[{'plan':plan,'projects':{AID:{'name':'p','new':False}}}]
+        with patch.object(web,'JobAzure',return_value=api),patch.object(batch,'execute',side_effect=AssertionError('只读复用不应重新扫描全部库存')):
+            web.start_deploy(session,{'plan_id':'reviewed','confirmed':True});session.thread.join(3)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertTrue(session.results[0]['verified']);self.assertEqual(len(session.keys),1)
+        self.assertEqual(api.writes,[])
+
+    def test_preflight_reuses_successful_inventory_reads_but_execution_reads_stay_fresh(self):
+        session=web.Session();session.credential=Mock();event=threading.Event()
+        with patch.object(batch.Azure,'call',return_value={'value':[{'name':'synthetic'}]}) as call:
+            snapshot=web.job_api(session,event,snapshot=True)
+            first=snapshot.call('GET',AID+'/deployments');first['value'].clear()
+            self.assertEqual(len(snapshot.call('GET',AID+'/deployments')['value']),1)
+            self.assertEqual(call.call_count,1)
+            with self.assertRaises(ValueError):snapshot.call('PUT',AID,{'properties':{}})
+            live=web.job_api(session,event)
+            live.call('GET',AID+'/deployments');live.call('GET',AID+'/deployments')
+            self.assertEqual(call.call_count,3)
+
+    def test_fifty_five_subscriptions_are_scanned_deployed_verified_and_exportable(self):
+        from uuid import uuid5,NAMESPACE_DNS
+        subs=[{'subscriptionId':str(uuid5(NAMESPACE_DNS,'synthetic-sub-'+str(i))),'tenantId':TENANT,'state':'Enabled','displayName':f'Azure Subscription A{i:02d}'} for i in range(1,56)]
+        class Many(MemoryAzure):
+            def __init__(self):super().__init__();self.mutex=threading.Lock();self.active=0;self.maximum=0
+            def all(self,path,params=None):
+                if path=='/subscriptions':return subs
+                if path.endswith('/accounts'):
+                    with self.mutex:self.active+=1;self.maximum=max(self.maximum,self.active)
+                    try:
+                        time.sleep(.002);prefix=path.split('/providers/')[0]+'/'
+                        return [v for k,v in list(self.resources.items()) if k.startswith(prefix) and v.get('kind')=='AIServices']
+                    finally:
+                        with self.mutex:self.active-=1
+                return super().all(path,params)
+        api=Many();session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=subs
+        data={'subscription_ids':[s['subscriptionId'] for s in subs],'models':[{'name':'gpt-image-2','version':'2026-01-01'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=api):
+            web.start_scan(session,data);session.thread.join(10)
+            self.assertEqual(len(session.plans[0]['plan']['rows']),55)
+            self.assertGreater(api.maximum,1);self.assertLessEqual(api.maximum,web.MAX_CHECK_SUBSCRIPTIONS)
+            api.maximum=0
+            web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True});session.thread.join(10)
+            self.assertLessEqual(api.maximum,web.MAX_SUBSCRIPTIONS_IN_FLIGHT)
+        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(len(session.results),55);self.assertTrue(all(r['verified'] for r in session.results))
+        self.assertEqual(len(session.keys),55)
+        self.assertEqual(len(api.writes),len(set(api.writes)))
+
+    def test_final_verification_rejects_capacity_drift_and_never_writes(self):
+        api=MemoryAzure()
+        api.put(AID,{'kind':'AIServices','location':'eastus2','properties':{}})
+        api.put(AID+'/projects/p',{'properties':{}})
+        api.put(AID+'/deployments/image',{'sku':{'name':'GlobalStandard','capacity':1},'properties':{'model':{'format':'OpenAI','name':'gpt-image-2','version':'v'}}})
+        api.writes=[]
+        session=web.Session();session.api=Mock();session.credential=Mock()
+        session.results=[{'订阅':'A03','订阅 ID':SID,'资源名称-foundry':'account','资源':'p','_account_id':AID,'model':'gpt-image-2','version':'v','sku':'GlobalStandard','capacity':2,'deployment':'image','verified':False}]
+        with patch.object(web,'JobAzure',return_value=api):web.verify_results(session,threading.Event())
+        self.assertFalse(session.results[0]['verified'])
+        self.assertTrue(session.job['partial'])
+        self.assertEqual(api.writes,[])
+
+    def test_uncertain_write_is_not_replayed_after_rescan_in_same_session(self):
+        session=web.Session();session.credential=Mock();event=threading.Event()
+        with patch.object(batch.Azure,'call',side_effect=ValueError('transport interrupted')) as call:
+            api=web.job_api(session,event)
+            with self.assertRaises(ValueError):api.call('PUT',AID,{'properties':{}})
+            another=web.job_api(session,event)
+            with self.assertRaisesRegex(ValueError,'已提交'):another.call('PUT',AID,{'properties':{}})
+        self.assertEqual(call.call_count,1)
+
+    def test_web_defaults_to_maximum_and_can_select_tier1(self):
+        session=web.Session();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        self.assertEqual(web.configurations(session,data)[0][0]['quota_goal'],'maximum')
+        self.assertEqual(web.configurations(session,{**data,'quota_goal':'tier1'})[0][0]['quota_goal'],'tier1')
+
+    def test_empty_subscription_inventory_error_remains_visible_in_review(self):
+        class Unreadable(MemoryAzure):
+            def all(self,path,params=None):
+                if path.endswith('/accounts'):raise ValueError('资源读取失败，不可判断不存在')
+                return super().all(path,params)
+        session=web.Session();session.api=Mock();session.credential=Mock();session.tenant=TENANT;session.subscriptions=[{'subscriptionId':SID,'displayName':'Azure Subscription A03'}]
+        data={'subscription_ids':[SID],'models':[{'name':'gpt-image-2','version':'2026-01-01'}],'regions':['eastus2'],'resource_group_template':'CV-{subcode}','account_template':'cv-{subcode}-{index:03d}','project_template':'{foundry}-resource'}
+        with patch.object(web,'JobAzure',return_value=Unreadable()):web.start_scan(session,data);session.thread.join(3)
+        self.assertEqual(session.plans[0]['plan']['rows'][0]['status'],'blocked')
+        self.assertEqual(session.plans[0]['plan']['rows'][0]['subscription_id'],SID)
+        self.assertEqual(session.plans[0]['authoritative']['rows'],[])
+
+    def test_actual_result_keeps_sku_and_real_request_url(self):
+        row={'subscription':'A03','subscription_id':SID,'region':'eastus2','model':'gpt-image-2'}
+        output={'account_id':AID,'model':{'name':'gpt-image-2','version':'actual'},'deployment':'image','capacity':2,'sku':'GlobalStandard','endpoints':{'AI Foundry API':'https://account.services.ai.azure.com/'}}
+        actual=web.result_row(row,output,'project','existing')
+        self.assertEqual(actual['sku'],'GlobalStandard')
+        self.assertEqual(actual['url'],'https://account.services.ai.azure.com/openai/v1/images/generations')
+
+    def test_customer_template_has_exact_headers_three_sheets_and_subscription_summary(self):
+        from openpyxl import load_workbook
+        rows=[{'订阅':'A03','订阅 ID':SID,'资源名称-foundry':'account','资源':'project','url':'https://account.services.ai.azure.com/openai/v1/images/generations','密钥':'synthetic','_account_id':AID,'status':'已核验','verified':True,'model':'gpt-image-2','sku':'GlobalStandard'}]
+        book=load_workbook(io.BytesIO(web.excel(rows,rows,[{'subscriptionId':SID,'displayName':'A03'}])))
+        self.assertEqual(book.sheetnames,['Sheet1','Sheet2','Sheet3'])
+        self.assertEqual(book['Sheet1']['D1'].value,'资源名称-foundry项目')
+        self.assertEqual(book['Sheet1']['F2'].value,'project')
+        self.assertIsNone(book['Sheet1']['G2'].hyperlink)
+        self.assertEqual(book['Sheet3'].max_row,2)
+
+    def test_duplicate_existing_deployments_cannot_hide_an_unverified_target(self):
+        from openpyxl import load_workbook
+        rows=[{'订阅':'A03','订阅 ID':SID,'资源':'p','_account_id':AID,'model':'gpt-image-2','region_code':'eastus2','deployment':name,'verified':True} for name in ('one','two')]
+        scopes=[{'subscriptionId':SID,'expected_models':2,'expected_targets':[['gpt-image-2','eastus2',AID.lower(),'one'],['gpt-image-2','westus3',AID.lower(),'three']]}]
+        sheet=load_workbook(io.BytesIO(web.excel(rows,rows,scopes)))['Sheet3']
+        values=dict(zip(next(sheet.values),list(sheet.values)[1]))
+        self.assertEqual(values['结果'],'未完成核验')
+        self.assertEqual(values['未完成项'],1)
+
+    def test_missing_second_existing_deployment_is_not_hidden_in_export(self):
+        from openpyxl import load_workbook
+        session=web.Session()
+        row={'subscription':'A03','subscription_id':SID,'region':'eastus2','model':'gpt-image-2','status':'existing','existing':[{'account_id':AID,'deployment':name} for name in ('one','two')]}
+        session.plans=[{'plan':{'rows':[row]}}]
+        session.results=[{'订阅':'A03','订阅 ID':SID,'资源':'p','_account_id':AID,'model':'gpt-image-2','region_code':'eastus2','deployment':'one','verified':True}]
+        session.selected_subscriptions=[{'subscriptionId':SID,'expected_targets':[list(t) for t in web.required_targets(row)]}]
+        details=web.export_details(session)
+        self.assertEqual({r['deployment'] for r in details},{'one','two'})
+        sheet=load_workbook(io.BytesIO(web.excel(session.results,details,session.selected_subscriptions)))['Sheet3']
+        values=dict(zip(next(sheet.values),list(sheet.values)[1]))
+        self.assertEqual(values['结果'],'未完成核验');self.assertEqual(values['未完成项'],1)
+
     def test_incompatible_subscription_does_not_stop_later_subscription(self):
         second='22222222-2222-4222-8222-222222222222';second_aid=AID.replace(SID,second)
         class Multiple(MemoryAzure):
@@ -69,7 +353,7 @@ class WorkflowTests(unittest.TestCase):
             try:web.start_deploy(session,{'plan_id':session.plan_id,'confirmed':True})
             except ValueError as error:self.fail('应继续可用订阅：'+str(error))
             session.thread.join(3)
-        self.assertEqual(session.job['status'],'done',session.job)
+        self.assertEqual(session.job['status'],'partial',session.job)
         self.assertTrue(any(p.startswith(second_aid+'/deployments/') for p in api.writes))
         self.assertTrue(all('/subscriptions/'+second+'/' in p for p in api.writes))
         self.assertEqual(session.results[0]['订阅 ID'],second)
@@ -284,7 +568,7 @@ class WorkflowTests(unittest.TestCase):
         from openpyxl import load_workbook
         rows=[{'订阅':'=unsafe','订阅 ID':SID,'资源组':'CV-A03','资源名称-foundry':'cv-a03-001','区域':'East US 2','资源':'cv-a03-001-resource','url':'https://example.invalid','密钥':'synthetic-key'}]
         book=load_workbook(io.BytesIO(web.excel(rows)))
-        self.assertEqual(list(next(book.active.values)),list(web.COLUMNS))
+        self.assertEqual(list(next(book.active.values)),list(web.TEMPLATE_COLUMNS))
         self.assertEqual(book.active['A2'].data_type,'s')
         self.assertEqual(book.active['H2'].value,'synthetic-key')
 

@@ -4,13 +4,13 @@
 
 ```powershell
 # 只查本地环境，不登录、不访问 Azure。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --offline
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --offline
 
 # 有配置并完成客户登录后：只读验证登录和订阅可见范围。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --config config.json
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --config config.json
 
 # 应用方式无需 CLI。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --auth app --config config.json --credentials output/app-01.private.json
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --auth app --config config.json --credentials output/app-01.private.json
 ```
 
 诊断不会安装软件、自动登录、弹出授权、生成 Secret 或修改 Azure。`--offline` 通过只代表本地依赖就绪；在线诊断通过只代表令牌及订阅读取有效，不证明创建/角色分配/Key 权限。

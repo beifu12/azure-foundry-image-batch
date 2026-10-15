@@ -1,4 +1,16 @@
-# Azure Foundry 模型部署工具
+# Azure Foundry 多模型部署工作台
+
+面向客户的浏览器工具：登录客户 Azure 账号 → 勾选多个订阅和模型 → 检查已有部署与真实配额 → 确认创建缺失项 → 按客户模板导出 Excel。客户日常使用无需脚本或 Azure CLI。
+
+支持 10 个模型：`gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-6-sol`、`gpt-6-luna`、`gpt-6-astra`、`gpt-6.1-sol`。实际可用性以客户订阅返回的目录为准。
+
+## 推荐入口
+
+客户使用部署者提供的 HTTPS 工作台网址，在网页完成 Microsoft 登录和设置。租户、订阅、模型、区域、命名规则均在网页填写；网页不会要求复制 Token 或提交密码。
+
+部署者可以在 Ubuntu 下载本仓库后运行 `docker compose up -d --build`，本机访问 `http://127.0.0.1:8767/`；正式 Azure Container App 的 OAuth 回调和 Secret 配置见 [部署说明](docs/WEB_GUIDE.md#azure-container-app)。不配置 OAuth 的本地容器使用设备代码登录，无需安装 Azure CLI。
+
+开发与 Agent 统一入口为 `python -X utf8 foundry_models.py web`；可选脚本入口为 `foundry_models.py doctor / scan / deploy / setup-app`。原有 `image_batch.py`、`web_app.py` 调用继续兼容，所有入口共用部署逻辑。
 
 ## 客户网页与容器
 
@@ -8,23 +20,24 @@
 
 网页默认使用 Azure 返回的默认版本；高级设置仍可以指定精确版本。新部署采用检查时确认的版本，不自动升级现有部署。`gpt-image-2` 候选区域限定为 East US 2、West US 3、Poland Central、Sweden Central、UAE North；其余模型独立查询各自区域。
 
-容器启动、Azure Container App 部署、登录策略、Tier 1 目标和客户 Excel 格式见 [客户网页使用说明](docs/WEB_GUIDE.md)。生图新部署目标为 2 RPM，所有文本新部署目标为 1,000,000 TPM；以实际可用额度和 Azure 容量换算为准，不自动修改已有部署。下文保留原有脚本方式，脚本仍要求明确填写版本。
+容器启动、登录策略、最大合法配额和客户 Excel 格式见 [客户网页使用说明](docs/WEB_GUIDE.md)。网页默认按真实配额、SKU 约束和区域容量配置最大合法 TPM / RPM，可改为 Tier 1 目标（生图 2 RPM、文本 1,000,000 TPM），不自动修改已有部署。只读检查最多同时处理八个订阅、全进程最多十六项检查请求；实际创建仍最多三个订阅并行。完成后核验实际部署并读取现有 Key，导出资源、模型明细、订阅汇总三张表。下文脚本方式供开发者及 Agent 使用，脚本单模型配置仍要求明确填写版本；多模型批量任务推荐网页。
 
-公共仓库：[beifu12/azure-foundry-image-batch](https://github.com/beifu12/azure-foundry-image-batch)。客户可以点击 **Code → Download ZIP**，或在 [发布页面](https://github.com/beifu12/azure-foundry-image-batch/releases/latest) 下载完整脚本包。
+公共仓库：[Azure Foundry 多模型工作台](https://github.com/beifu12/azure-foundry-image-batch)。仓库地址保留以兼容旧链接，项目已包含生图和文本模型的完整网页工作台。客户可以点击 **Code → Download ZIP**，或在 [发布页面](https://github.com/beifu12/azure-foundry-image-batch/releases/latest) 下载源码发布包。
 
-发布包内的目录及文件名全部使用 ASCII 英文，解压后的固定目录为 `azure-foundry-image-batch`；中文说明仍保留在文件内容中，避免部分 Linux 解压工具将中文目录名解错。
+发布包内的目录及文件名全部使用 ASCII 英文，v2 发布包的固定目录为 `azure-foundry-model-workspace`；中文说明保留在文件内容中，避免 Linux 解压后的目录乱码。
 
 Ubuntu 下载入口（在当前目录没有同名解压目录时使用）：
 
 ```bash
-curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v1.2.4/azure-foundry-image-batch.zip -o image-batch-v1.2.4.zip
-unzip image-batch-v1.2.4.zip
-cd azure-foundry-image-batch
+curl -fL https://github.com/beifu12/azure-foundry-image-batch/releases/download/v2.0.0/azure-foundry-model-workspace.zip -o foundry-models-v2.0.0.zip
+unzip foundry-models-v2.0.0.zip
+cd azure-foundry-model-workspace
+docker compose up -d --build
 ```
 
 旧版解出的乱码目录可以暂时保留，不影响进入新版英文目录。
 
-在客户自己的电脑或 Cloud Shell 中运行。支持 Azure 公有云；不需要登录玖云 Dashboard，也不把客户凭据上传到玖云。
+自有部署在客户自己的环境运行，仅支持 Azure 公有云；不需要登录玖云 M365。使用别人托管的网页时，Azure 委托访问令牌和读取的 Key 会在该服务进程内存处理，退出或容器重启后清除；不要把它与“凭据不离开本机”的自有部署混淆。
 
 客户直接使用请按本文运行；交给自己的 Agent 时，先让它阅读 [Agent 操作指南](docs/AGENT_GUIDE.md) 和 [AGENTS.md](AGENTS.md)。环境、登录及常见失败见 [排障说明](docs/TROUBLESHOOTING.md)。
 
@@ -45,7 +58,7 @@ cd azure-foundry-image-batch
 
 不要默认认为“五区域 × 每区 2 RPM = 10 RPM”。微软已开始引入订阅级共享配额，各模型处于逐步切换中；同模型版本的 Global Standard 可能跨区域共享，Data Zone Standard 可能按数据区共享。配置必须按客户租户当前实际配额确认。
 
-当前官方 Tier 1 参考表中，`gpt-image-2` 的 DataZoneStandard 为 2 RPM、GlobalStandard 为 6 RPM；`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst` GlobalStandard 均为 5 RPM。表格是参考，不代替订阅实时配额，也不保证所有区域均能部署。
+本工具的 Tier 1 目标是生图 2 RPM、文本 1,000,000 TPM，不代表微软对每个订阅承诺的额度。网页默认的“最大合法值”按实际配额余额、SKU 最小值/最大值/步长和区域容量计算，不能把容量单位直接当 TPM 或 RPM。
 
 `quota_scope` 可选值：
 
@@ -77,15 +90,17 @@ Copy-Item config.example.json config.json
 
 ```powershell
 # 首先只检查本地环境，不登录、不访问 Azure。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --offline
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --offline
 
 # 使用应用身份时：缺少 CLI 不会阻止这个本地检查。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --offline --auth app
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --offline --auth app
 ```
 
 Linux/macOS/Cloud Shell 的创建环境命令同样是 `python -m venv .venv`，之后把本文 `.\.venv\Scripts\python` 替换为 `.venv/bin/python`。脚本只调用 Python 与（管理员方式下的）Azure CLI，不需要安装 Azure CLI 的 Foundry 扩展。
 
 编辑 `config.json`：
+
+生图示例为 `config.example.json`，文本示例为 `config.text.example.json`。示例只有占位内容，不含客户账号或 Key；请替换租户和目录返回的精确版本。网页不需要配置文件，使用 Azure 默认版本并同时选择多个模型。
 
 1. 把 `tenant_id` 替换为客户的目录（租户）ID。
 2. 默认 `subscription_ids: "all"`。试运行建议改为 `["客户测试订阅ID"]`。
@@ -116,16 +131,16 @@ az cloud set --name AzureCloud
 az login --tenant "客户租户ID" --allow-no-subscriptions
 
 # 在相同终端只读检查登录及所选订阅范围。
-.\.venv\Scripts\python -X utf8 image_batch.py doctor --config config.json
+.\.venv\Scripts\python -X utf8 foundry_models.py doctor --config config.json
 
 # 只读扫描，首次扫描可保持 quota_scope=unknown。
-.\.venv\Scripts\python -X utf8 image_batch.py scan --config config.json --plan output/plan-01.json
+.\.venv\Scripts\python -X utf8 foundry_models.py scan --config config.json --plan output/plan-01.json
 ```
 
 查看清单 `rows`、`errors`。`planned` 表示准备创建；`existing` 表示已有部署；`blocked` 表示无法确认或额度不足。确认区域、命名、配额范围和全部创建项后，再执行：
 
 ```powershell
-.\.venv\Scripts\python -X utf8 image_batch.py deploy --config config.json --plan output/plan-01.json --execute --output output/result-01.json --include-keys --secret-output output/keys-01.private.json
+.\.venv\Scripts\python -X utf8 foundry_models.py deploy --config config.json --plan output/plan-01.json --execute --output output/result-01.json --include-keys --secret-output output/keys-01.private.json
 ```
 
 如果修改了配置、配额或资源，请生成新清单，例如 `--plan output/plan-02.json`。不要编辑清单绕过检查。输出文件已存在时不会覆盖，下一次必须用新文件名。
@@ -137,13 +152,13 @@ az login --tenant "客户租户ID" --allow-no-subscriptions
 先以管理员登录同一个客户租户，然后检查应用和授权方案：
 
 ```powershell
-.\.venv\Scripts\python -X utf8 image_batch.py setup-app --config config.json --app-name "客户确认的图像部署应用名称" --output output/app-check-01.json --secret-output output/app-01.private.json
+.\.venv\Scripts\python -X utf8 foundry_models.py setup-app --config config.json --app-name "客户确认的模型部署应用名称" --output output/app-check-01.json --secret-output output/app-01.private.json
 ```
 
 确认后执行初始化：
 
 ```powershell
-.\.venv\Scripts\python -X utf8 image_batch.py setup-app --config config.json --app-name "客户确认的图像部署应用名称" --execute --secret-days 90 --output output/app-result-01.json --secret-output output/app-01.private.json
+.\.venv\Scripts\python -X utf8 foundry_models.py setup-app --config config.json --app-name "客户确认的模型部署应用名称" --execute --secret-days 90 --output output/app-result-01.json --secret-output output/app-01.private.json
 ```
 
 - 未找到该名称应用：创建单租户应用、企业应用、一条 90 天密钥，逐订阅补齐 Contributor。
@@ -156,8 +171,8 @@ az login --tenant "客户租户ID" --allow-no-subscriptions
 使用新凭据进行扫描与部署：
 
 ```powershell
-.\.venv\Scripts\python -X utf8 image_batch.py scan --config config.json --auth app --credentials output/app-01.private.json --plan output/app-plan-01.json
-.\.venv\Scripts\python -X utf8 image_batch.py deploy --config config.json --auth app --credentials output/app-01.private.json --plan output/app-plan-01.json --execute --output output/app-deploy-01.json --include-keys --secret-output output/app-keys-01.private.json
+.\.venv\Scripts\python -X utf8 foundry_models.py scan --config config.json --auth app --credentials output/app-01.private.json --plan output/app-plan-01.json
+.\.venv\Scripts\python -X utf8 foundry_models.py deploy --config config.json --auth app --credentials output/app-01.private.json --plan output/app-plan-01.json --execute --output output/app-deploy-01.json --include-keys --secret-output output/app-keys-01.private.json
 ```
 
 也支持 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET` 环境变量。不要把 Secret 写入命令行参数、源码、普通配置或公共仓库。角色生效可能有延迟；403 时检查授权后重新扫描，不会自动反复创建应用/密钥。
@@ -176,11 +191,11 @@ az login --tenant "客户租户ID" --allow-no-subscriptions
 
 ## 验证范围
 
-已通过模拟 Azure 响应的自动化测试，涵盖配额分配、重复部署、状态变化、失败继续、凭据文件保护等。尚未在客户租户完成真实应用创建、RBAC 分配、模型部署和 Key 读取验收；首次仅执行一个测试订阅，再核对 Portal 及 API 调用。部署脚本不发起付费的图片生成测试。
+已通过模拟 Azure 响应的自动化测试，涵盖配额分配、重复部署、状态变化、失败继续、凭据文件保护等。模型创建、Project、现有 Key 读取及客户模板导出已在获准环境验证；其他客户仍需先验收一个试点订阅。应用初始化及 RBAC 是独立流程，不因模型部署验收而默认获得验证。工具不发起付费推理测试。
 
 公共仓库的自动检查在 Windows/Linux、Python 3.10/3.12 上运行模拟测试和应用身份离线环境检查，不使用 Azure 凭据。GitHub 自检通过也不等于客户环境已部署成功。
 
-维护者可运行 `python package_release.py --output dist/azure-foundry-image-batch.zip` 生成源码白名单发布包。它不收集真实 config、凭据或结果，并且不会覆盖已存在的压缩包。
+维护者可运行 `python package_release.py --output dist/azure-foundry-model-workspace.zip` 生成源码白名单发布包。它不收集真实 config、凭据或结果，并且不会覆盖已存在的压缩包。
 
 ## 官方参考
 

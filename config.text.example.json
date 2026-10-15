@@ -1,0 +1,14 @@
+{
+  "tenant_id": "REPLACE_WITH_CUSTOMER_TENANT_ID",
+  "subscription_ids": "all",
+  "model": "gpt-6.1-sol",
+  "model_version": "REPLACE_WITH_AZURE_MODEL_VERSION",
+  "sku": "GlobalStandard",
+  "regions": ["eastus2"],
+  "quota_goal": "maximum",
+  "quota_scope": "auto",
+  "data_zones": {},
+  "resource_group_template": "rg-model-{sub8}-{region}",
+  "account_template": "ai-model-{sub8}-{region}",
+  "deployment_name": "gpt-6.1-sol"
+}

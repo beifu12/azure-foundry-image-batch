@@ -84,6 +84,12 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(report['rows'][0]['status'],'existing')
         self.assertEqual(report['errors'],[])
 
+    def test_fully_existing_fixed_regions_do_not_request_new_deployment_capacity(self):
+        api=self.existing_api('GlobalStandard');config=configuration();config['regions']=['eastus2']
+        report=batch.scan(api,config)
+        self.assertEqual(report['rows'][0]['status'],'existing')
+        self.assertFalse(any(path.endswith('/modelCapacities') for _,path in api.calls))
+
     def test_capacity_read_failure_does_not_hide_existing_or_allow_new_creation(self):
         api=self.existing_api('GlobalStandard');original=api.all
         def read(path,params=None):
@@ -521,7 +527,7 @@ class PackageTests(unittest.TestCase):
             self.package.build_package(output)
             with zipfile.ZipFile(output) as archive:
                 self.assertTrue(all(name.isascii() for name in archive.namelist()))
-                self.assertTrue(all(name.startswith('azure-foundry-image-batch/') for name in archive.namelist()))
+                self.assertTrue(all(name.startswith('azure-foundry-model-workspace/') for name in archive.namelist()))
                 self.assertIsNone(archive.testzip())
 
     def test_package_excludes_local_customer_files(self):

@@ -1,6 +1,6 @@
 # 给客户 Agent 的操作约定
 
-本目录是独立的 Azure 公有云图像模型部署工具。先读 `README.md`、`docs/AGENT_GUIDE.md` 和 `docs/TROUBLESHOOTING.md`。所有对客户的说明、结果摘要和问题使用中文。
+本目录是独立的 Azure 公有云多模型部署工作台，支持生图和文本。先读 `README.md`、`docs/AGENT_GUIDE.md` 和 `docs/TROUBLESHOOTING.md`。所有对客户的说明、结果摘要和问题使用中文。客户优先使用网页，统一命令入口为 `foundry_models.py`；旧 `image_batch.py` 保持兼容。
 
 ## 默认行为
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Azure 图像模型批量部署。默认只读；仅支持 Azure 公有云。"""
+"""Azure 生图和文本模型批量部署。默认只读；仅支持 Azure 公有云。"""
 import argparse
 import json
 import math
@@ -117,15 +117,34 @@ def allocate(rows):
         # The common image model SKU has min=1/step=1. Water filling avoids a
         # quadratic allocation at high quota tiers while using all legal capacity.
         capacities=[rows[i].get('constraints') or {k:rows[i][k] for k in ('minimum','maximum','step')} for i in indexes]
-        if all(not c.get('allowedValues') and c.get('minimum')==1 and c.get('step')==1 for c in capacities):
-            limits={i:integer(rows[i]['maximum']) for i in indexes}
-            active=[i for i in indexes if limits[i]>0]
+        if len(indexes)==1:
+            i=indexes[0];values[i]=allowed_capacity(min(budget,integer(rows[i]['maximum'])),capacities[0])
+            continue
+        unit=capacities[0].get('step');minimum=capacities[0].get('minimum')
+        if unit and minimum and all(not c.get('allowedValues') and c.get('minimum')==minimum and c.get('step')==unit for c in capacities):
+            unit=integer(unit,'SKU capacity.step');minimum=integer(minimum,'SKU capacity.minimum')
+            ceilings={i:allowed_capacity(integer(rows[i]['maximum']),c) for i,c in zip(indexes,capacities)}
+            candidates=sorted((i for i in indexes if ceilings[i]>0),key=lambda i:-ceilings[i])
+            # For k active regions, every total is k*minimum + n*step.
+            # Choose the largest feasible total, then the most active regions.
+            best=(0,0);ceiling=0
+            for count,i in enumerate(candidates,1):
+                ceiling+=ceilings[i];base=count*minimum
+                if base>budget:break
+                total=base+((min(budget,ceiling)-base)//unit)*unit
+                best=max(best,(total,count))
+            total,count=best;selected=candidates[:count]
+            for i in selected:values[i]=minimum
+            limits={i:(ceilings[i]-minimum)//unit for i in selected}
+            extra={i:0 for i in selected};budget=(total-count*minimum)//unit
+            active=[i for i in selected if limits[i]>0]
             while active and budget:
                 share=max(1,budget//len(active))
                 for i in active:
-                    amount=min(share,limits[i]-values[i],budget)
-                    values[i]+=amount;budget-=amount
-                active=[i for i in active if values[i]<limits[i]]
+                    amount=min(share,limits[i]-extra[i],budget)
+                    extra[i]+=amount;budget-=amount
+                active=[i for i in active if extra[i]<limits[i]]
+            for i in selected:values[i]+=extra[i]*unit
             continue
         # Sparse bounded allocation maximizes total capacity; for each total keep
         # the spread with more nonzero regions, then the more balanced spread.
@@ -267,6 +286,7 @@ def check_config(config):
     for key in ('resource_group_template','account_template','deployment_name'):
         if not config.get(key): raise ValueError('须由客户确认并填写命名规则。')
     if config.get('quota_scope','unknown') not in ('unknown','auto','regional','subscription','data-zone'): raise ValueError('quota_scope 无效。')
+    if config.get('quota_goal','tier1') not in ('tier1','maximum'):raise ValueError('quota_goal 须为 tier1 或 maximum。')
     if config.get('quota_scope') == 'subscription' and config['sku'] != 'GlobalStandard': raise ValueError('订阅全局共享池仅适用于 GlobalStandard。')
     if config.get('quota_scope') == 'data-zone' and config['sku'] != 'DataZoneStandard': raise ValueError('数据区共享池仅适用于 DataZoneStandard。')
 
@@ -296,6 +316,9 @@ def model_metadata(api, sid, region, config):
     unit=unit_rpm if image else unit_tpm;label='RPM' if image else 'TPM'
     if unit is None or unit<=0 or not math.isfinite(unit):raise ValueError('Azure 未返回有效的 '+label+' 与容量换算关系，无法按 Tier 1 目标安排创建。')
     maximum = allowed_capacity(min(remaining,math.floor(target/unit)),constraints)
+    if config.get('quota_goal')=='maximum':
+        maximum=allowed_capacity(remaining,constraints)
+        target=maximum*unit
     return dict(usage_name=sku['usageName'],remaining=remaining,maximum=maximum,constraints=constraints,unit_rpm=unit_rpm,unit_tpm=unit_tpm,**{'target_rpm' if image else 'target_tpm':target})
 
 
@@ -318,8 +341,12 @@ def scan(api, config, on_progress=None):
                         if same_model(deployment, config['model']): inventory.append((account,deployment))
             versions=config.get('regional_versions',{}).get(sid,{})
             capacities=[];capacity_error=''
+            requested=config.get('regions','auto')
+            occupied={a['location'].replace(' ','').lower() for a,d in inventory}
+            fully_existing=isinstance(requested,list) and set(requested)<=occupied
             try:
-                if versions:
+                if fully_existing:pass  # No new regional capacity is needed for read-only reuse.
+                elif versions:
                     for version in dict.fromkeys(versions.values()):
                         found=api.all(root+'/providers/Microsoft.CognitiveServices/modelCapacities', {'api-version':VERSION,'modelFormat':'OpenAI','modelName':config['model'],'modelVersion':version})
                         capacities.extend(r for r in found if versions.get(r.get('location','').replace(' ','').lower())==version)
@@ -393,7 +420,7 @@ def wait_ready(api, path, timeout=900):
 def account_result(account, deployment):
     props=account.get('properties',{})
     dp=deployment.get('properties',{})
-    return {'account_id':account['id'],'endpoint':props.get('endpoint'),'endpoints':props.get('endpoints',{}),'deployment':deployment.get('name'),'model':dp.get('model'), 'capacity':deployment.get('sku',{}).get('capacity'),'rpm':rpm(dp.get('rateLimits')),'tpm':tpm(dp.get('rateLimits')),'rate_limits':dp.get('rateLimits',[])}
+    return {'account_id':account['id'],'endpoint':props.get('endpoint'),'endpoints':props.get('endpoints',{}),'deployment':deployment.get('name'),'model':dp.get('model'),'sku':deployment.get('sku',{}).get('name'), 'capacity':deployment.get('sku',{}).get('capacity'),'rpm':rpm(dp.get('rateLimits')),'tpm':tpm(dp.get('rateLimits')),'rate_limits':dp.get('rateLimits',[])}
 
 
 def execute(api, confirmed, on_progress=None, blocked=None):
@@ -424,7 +451,7 @@ def execute(api, confirmed, on_progress=None, blocked=None):
             aid=row['account_id'];did=aid+'/deployments/'+row['deployment']
             if api.optional(did) is not None: raise ValueError('目标部署名称已经占用；不覆盖已有部署。请重新扫描。')
             remaining=model_metadata(api,row['subscription_id'],row['region'],{**fresh['config'],'model_version':row['version']})
-            if row['capacity']>remaining['maximum']:raise ValueError('当前余额低于清单目标；此项未创建资源，请重新检查。')
+            if row['capacity']>remaining['maximum'] or allowed_capacity(row['capacity'],remaining['constraints'])!=row['capacity']:raise ValueError('当前余额或合法容量约束不符合清单目标；此项未创建资源，请重新检查。')
             if row['new_account']:
                 if api.optional(aid) is not None: raise ValueError('目标账户已经存在；不覆盖，须重新扫描。')
                 group='/subscriptions/'+row['subscription_id']+'/resourceGroups/'+row['resource_group']
@@ -439,7 +466,7 @@ def execute(api, confirmed, on_progress=None, blocked=None):
             # Check quota again after long-running account creation. The planned
             # capacity stays fixed; shared quota is also checked conservatively.
             remaining=model_metadata(api,row['subscription_id'],row['region'],{**fresh['config'],'model_version':row['version']})
-            if row['capacity']>remaining['maximum']: raise ValueError('当前剩余合法容量低于确认值；未创建部署，请重扫。')
+            if row['capacity']>remaining['maximum'] or allowed_capacity(row['capacity'],remaining['constraints'])!=row['capacity']: raise ValueError('当前余额或合法容量约束不符合确认值；未创建部署，请重扫。')
             api.put(did,{'sku':{'name':row['sku'],'capacity':row['capacity']},'properties':{'model':{'format':'OpenAI','name':row['model'],'version':row['version']},'versionUpgradeOption':'NoAutoUpgrade'}})
             deployed=wait_ready(api,did)
             if not same_model(deployed,row['model'],row['sku']) or deployed.get('sku',{}).get('capacity')!=row['capacity'] or deployed.get('properties',{}).get('model',{}).get('version')!=row['version']: raise ValueError('Azure 返回部署与确认配置不一致，需人工检查。')
@@ -507,8 +534,8 @@ def environment_report(mode, config=None, credential_file=None, online=False):
     return report
 
 
-def main():
-    parser=argparse.ArgumentParser(description='Azure 图像模型批量部署：默认扫描；执行前重新核对。',add_help=False)
+def main(argv=None):
+    parser=argparse.ArgumentParser(description='Azure 多模型部署：默认扫描；执行前重新核对。',add_help=False)
     parser._positionals.title='操作命令';parser._optionals.title='选项'
     parser.add_argument('-h','--help',action='help',help='显示中文帮助并退出')
     parser.add_argument('command',choices=('doctor','scan','deploy','setup-app'),help='doctor：环境检查；scan：扫描；deploy：部署；setup-app：检查/配置应用授权')
@@ -524,7 +551,7 @@ def main():
     parser.add_argument('--app-name',help='客户确认的应用名称')
     parser.add_argument('--new-secret',action='store_true',help='为已有应用增加一条新密钥（保留旧密钥）')
     parser.add_argument('--secret-days',type=int,default=90,help='应用密钥有效期，默认90天')
-    args=parser.parse_args()
+    args=parser.parse_args(argv)
     try:
         if args.command=='doctor':
             config=read_json(args.config) if Path(args.config).is_file() else None
